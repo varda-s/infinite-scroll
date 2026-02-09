@@ -1,0 +1,124 @@
+"""Printer selection panel component."""
+
+from nicegui import ui
+
+from src.ui.state import app_state
+
+
+def check_rongta_connected() -> bool:
+    """Check if a Rongta printer is connected via USB.
+
+    Returns:
+        True if a Rongta printer is detected.
+    """
+    try:
+        import usb.core
+
+        # Known Rongta vendor IDs
+        rongta_vendors = [0x0483, 0x6868, 0x0416]
+
+        for vendor_id in rongta_vendors:
+            device = usb.core.find(idVendor=vendor_id)
+            if device is not None:
+                return True
+        return False
+    except ImportError:
+        # pyusb not installed
+        return False
+    except Exception:
+        return False
+
+
+def create_printer_panel(
+    on_start_session: callable,
+    on_stop_session: callable,
+) -> ui.card:
+    """Create the printer selection panel.
+
+    Args:
+        on_start_session: Callback when start session is clicked.
+        on_stop_session: Callback when stop session is clicked.
+
+    Returns:
+        The printer panel card element.
+    """
+    with ui.card().classes("w-full") as card:
+        ui.label("PRINTER").classes("text-lg font-bold text-gray-700 mb-2")
+
+        # Check if Rongta is connected
+        rongta_available = check_rongta_connected()
+
+        # Printer type selection
+        with ui.column().classes("w-full gap-2"):
+            # Mock option (always available)
+            mock_radio = ui.radio(
+                options={"mock": "Mock (Console)"},
+                value="mock" if app_state.printer_type == "mock" else None,
+            ).classes("w-full")
+
+            # Rongta option (only if connected)
+            with ui.row().classes("w-full items-center"):
+                if rongta_available:
+                    rongta_radio = ui.radio(
+                        options={"rongta": "Rongta (Thermal)"},
+                        value="rongta" if app_state.printer_type == "rongta" else None,
+                    ).classes("flex-1")
+                else:
+                    with ui.row().classes("items-center gap-2 text-gray-400"):
+                        ui.radio(
+                            options={"rongta": "Rongta (Thermal)"},
+                            value=None,
+                        ).classes("flex-1").props("disable")
+                        ui.icon("usb_off").classes("text-gray-400")
+                    ui.tooltip("Connect printer via USB first")
+
+        def on_mock_change(e):
+            if e.args:
+                app_state.set_printer_type("mock")
+                if rongta_available:
+                    rongta_radio.value = None
+
+        def on_rongta_change(e):
+            if e.args and rongta_available:
+                app_state.set_printer_type("rongta")
+                mock_radio.value = None
+
+        mock_radio.on("update:model-value", on_mock_change)
+        if rongta_available:
+            rongta_radio.on("update:model-value", on_rongta_change)
+
+        ui.separator().classes("my-3")
+
+        # Session control buttons
+        button_container = ui.column().classes("w-full gap-2")
+
+        def update_buttons():
+            button_container.clear()
+            with button_container:
+                if app_state.session_active:
+                    ui.button(
+                        "Stop Session",
+                        icon="stop",
+                        on_click=on_stop_session,
+                    ).classes("w-full bg-red-500").props("color=negative")
+                else:
+                    has_device = app_state.connected_device is not None
+                    start_btn = ui.button(
+                        "Start Session",
+                        icon="play_arrow",
+                        on_click=on_start_session,
+                    ).classes("w-full")
+
+                    if not has_device:
+                        start_btn.disable()
+                        start_btn.tooltip("Connect a device first")
+                    else:
+                        start_btn.props("color=positive")
+
+        # Initial render
+        update_buttons()
+
+        # Register for state updates
+        app_state.add_update_callback(update_buttons)
+
+    return card
