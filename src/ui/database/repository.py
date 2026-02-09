@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
     },
     # Capture settings
     "capture_fps": {
-        "value": "10",
+        "value": "20",
         "description": "Screen capture frames per second (higher = more CPU usage)",
         "value_type": "int",
         "category": "capture",

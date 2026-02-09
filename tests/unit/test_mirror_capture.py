@@ -4,6 +4,7 @@ import subprocess
 from unittest.mock import patch, MagicMock
 
 import pytest
+from PIL import Image
 
 from src.capture.mirror_capture import (
     MirrorSource,
@@ -11,6 +12,7 @@ from src.capture.mirror_capture import (
     MirrorCapture,
     get_available_mirrors,
 )
+from src.capture import mirror_capture as mirror_capture_module
 from src.capture.base import DeviceType, DeviceInfo
 
 
@@ -58,8 +60,9 @@ class TestMirrorDetector:
         assert "iphone" in keywords
         assert "ipad" in keywords
 
+    @patch.object(MirrorDetector, "_detect_with_quartz", return_value=[])
     @patch("subprocess.run")
-    def test_detect_mirror_windows_empty_when_no_windows(self, mock_run):
+    def test_detect_mirror_windows_empty_when_no_windows(self, mock_run, _mock_quartz):
         """Test detect_mirror_windows returns empty list when no windows."""
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -70,8 +73,9 @@ class TestMirrorDetector:
 
         assert mirrors == []
 
+    @patch.object(MirrorDetector, "_detect_with_quartz", return_value=[])
     @patch("subprocess.run")
-    def test_detect_mirror_windows_finds_iphone_mirroring(self, mock_run):
+    def test_detect_mirror_windows_finds_iphone_mirroring(self, mock_run, _mock_quartz):
         """Test detect_mirror_windows finds iPhone Mirroring window first."""
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -85,8 +89,9 @@ class TestMirrorDetector:
         assert mirrors[0].app_name == "iPhone Mirroring"
         assert mirrors[0].window_name == "iPhone 15"
 
+    @patch.object(MirrorDetector, "_detect_with_quartz", return_value=[])
     @patch("subprocess.run")
-    def test_detect_mirror_windows_falls_back_to_quicktime(self, mock_run):
+    def test_detect_mirror_windows_falls_back_to_quicktime(self, mock_run, _mock_quartz):
         """Test detect_mirror_windows falls back to QuickTime when iPhone Mirroring not found."""
         # First call (iPhone Mirroring) returns empty, second call (QuickTime) returns window
         mock_run.side_effect = [
@@ -100,8 +105,9 @@ class TestMirrorDetector:
         assert mirrors[0].app_name == "QuickTime Player"
         assert mirrors[0].window_name == "iPhone 15"
 
+    @patch.object(MirrorDetector, "_detect_with_quartz", return_value=[])
     @patch("subprocess.run")
-    def test_detect_mirror_windows_handles_timeout(self, mock_run):
+    def test_detect_mirror_windows_handles_timeout(self, mock_run, _mock_quartz):
         """Test detect_mirror_windows handles subprocess timeout."""
         mock_run.side_effect = subprocess.TimeoutExpired("osascript", 5)
 
@@ -109,8 +115,9 @@ class TestMirrorDetector:
 
         assert mirrors == []
 
+    @patch.object(MirrorDetector, "_detect_with_quartz", return_value=[])
     @patch("subprocess.run")
-    def test_detect_mirror_windows_handles_error(self, mock_run):
+    def test_detect_mirror_windows_handles_error(self, mock_run, _mock_quartz):
         """Test detect_mirror_windows handles subprocess error."""
         mock_run.return_value = MagicMock(returncode=1, stdout="")
 
@@ -152,6 +159,73 @@ class TestMirrorDetector:
 
         assert isinstance(windows, list)
 
+    def test_is_reeldetector_source_accepts_uxplay(self):
+        """Test ReelTracker source filter accepts uxplay sources."""
+        source = MirrorSource(
+            window_id=10,
+            window_name="ReelTracker",
+            app_name="uxplay",
+            bounds=(0, 0, 500, 900),
+        )
+        assert MirrorDetector.is_reeldetector_source(source) is True
+
+    def test_is_reeldetector_source_accepts_uxplay_opengl_renderer(self):
+        """OpenGL renderer title from uxplay should be accepted."""
+        source = MirrorSource(
+            window_id=10,
+            window_name="OpenGL renderer",
+            app_name="uxplay",
+            bounds=(0, 392, 320, 268),
+        )
+        assert MirrorDetector.is_reeldetector_source(source) is True
+
+    def test_is_reeldetector_source_rejects_iphone_mirroring(self):
+        """Test ReelTracker source filter rejects built-in iPhone Mirroring."""
+        source = MirrorSource(
+            window_id=11,
+            window_name="iPhone 15",
+            app_name="iPhone Mirroring",
+            bounds=(0, 0, 500, 900),
+        )
+        assert MirrorDetector.is_reeldetector_source(source) is False
+
+    @patch.object(MirrorDetector, "_uxplay_log_stream_active", return_value=False)
+    @patch.object(MirrorDetector, "_capture_window_image", return_value=None)
+    def test_is_stream_active_false_when_window_sampling_unavailable_without_stream(
+        self, _mock_capture, _mock_log
+    ):
+        """If pixels cannot be sampled and no active stream is seen, treat as disconnected."""
+        source = MirrorSource(
+            window_id=123,
+            window_name="ReelTracker",
+            app_name="uxplay",
+            bounds=(0, 0, 500, 900),
+        )
+        assert MirrorDetector.is_stream_active(source) is False
+
+    @patch("src.capture.mirror_capture.HAS_QUARTZ", True)
+    @patch("src.capture.mirror_capture.Quartz.CGWindowListCopyWindowInfo")
+    def test_detect_with_quartz_finds_uxplay_when_not_frontmost_layer(
+        self, mock_windows
+    ):
+        """Detector should still find visible uxplay windows that are not frontmost."""
+        mock_windows.return_value = [
+            {
+                "kCGWindowOwnerName": "uxplay",
+                "kCGWindowName": "ReelTracker",
+                "kCGWindowLayer": 2,  # not frontmost normal layer
+                "kCGWindowBounds": {"Width": 500, "Height": 900, "X": 10, "Y": 10},
+                "kCGWindowNumber": 12345,
+            }
+        ]
+
+        mirrors = MirrorDetector._detect_with_quartz()
+        assert len(mirrors) == 1
+        assert mirrors[0].app_name == "uxplay"
+        assert mirrors[0].window_id == 12345
+        args, _kwargs = mock_windows.call_args
+        assert args[0] == mirror_capture_module.Quartz.kCGWindowListOptionAll
+
 
 class TestMirrorCapture:
     """Tests for the MirrorCapture class."""
@@ -188,7 +262,7 @@ class TestMirrorCapture:
 
         assert capture.is_connected is False
 
-    @patch.object(MirrorDetector, "detect_mirror_windows")
+    @patch.object(MirrorDetector, "detect_reeldetector_windows")
     def test_connect_fails_when_no_mirrors(self, mock_detect):
         """Test connect returns False when no mirrors detected."""
         mock_detect.return_value = []
@@ -199,7 +273,7 @@ class TestMirrorCapture:
         assert result is False
         assert capture.is_connected is False
 
-    @patch.object(MirrorDetector, "detect_mirror_windows")
+    @patch.object(MirrorDetector, "detect_reeldetector_windows")
     def test_connect_succeeds_with_auto_detect(self, mock_detect):
         """Test connect succeeds with auto-detection."""
         source = MirrorSource(
@@ -269,6 +343,33 @@ class TestMirrorCapture:
         result = capture.capture_screen()
 
         assert result is None
+
+    @patch.object(MirrorDetector, "detect_reeldetector_windows")
+    @patch.object(MirrorDetector, "_capture_window_image")
+    def test_capture_resolves_window_id_for_background_capture(self, mock_capture_image, mock_detect):
+        """If source has no window id, capture should resolve one via Quartz candidates."""
+        unresolved = MirrorSource(
+            window_id=0,
+            window_name="ReelTracker",
+            app_name="uxplay",
+            bounds=(0, 0, 400, 800),
+        )
+        resolved = MirrorSource(
+            window_id=42,
+            window_name="ReelTracker",
+            app_name="uxplay",
+            bounds=(100, 100, 500, 900),
+        )
+        mock_detect.return_value = [resolved]
+        mock_capture_image.return_value = Image.new("RGB", (120, 240), color=(0, 0, 0))
+
+        capture = MirrorCapture(mirror_source=unresolved)
+        assert capture.connect() is True
+        image = capture.capture_screen()
+
+        assert image is not None
+        assert capture._mirror_source is not None
+        assert capture._mirror_source.window_id == 42
 
     def test_get_foreground_app_returns_instagram(self):
         """Test get_foreground_app returns Instagram for mirror mode."""

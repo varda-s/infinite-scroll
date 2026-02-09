@@ -70,9 +70,9 @@ class ContentDetector:
     """
 
     # Thresholds for detection
-    MIN_ENTROPY_FOR_VIDEO = 5.0  # Minimum entropy to consider as video content
-    MIN_VERTICAL_RATIO = 1.5  # Minimum height/width ratio for vertical content
-    MAX_VERTICAL_RATIO = 2.5  # Maximum reasonable ratio (phone screen)
+    MIN_ENTROPY_FOR_VIDEO = 4.0  # Lowered for compressed mirror feeds
+    MIN_VERTICAL_RATIO = 1.2  # Allow letterboxed/windowed mirror frames
+    MAX_VERTICAL_RATIO = 3.2  # Allow cropped phone content
     DRAMATIC_HASH_THRESHOLD = 40  # Hash diff indicating major content change
     REELS_CONFIRMATION_FRAMES = 3  # Frames needed to confirm Reels mode
     NON_REELS_CONFIRMATION_FRAMES = 5  # Frames needed to confirm leaving Reels
@@ -124,6 +124,25 @@ class ContentDetector:
 
         is_vertical = self.MIN_VERTICAL_RATIO <= aspect_ratio <= self.MAX_VERTICAL_RATIO
         return aspect_ratio, is_vertical
+
+    def _extract_active_content_area(self, image: Image.Image) -> Image.Image:
+        """Extract non-black content area to handle letterboxed mirror windows."""
+        arr = np.array(image.convert("L"))
+        # Treat near-black as background bars
+        mask = arr > 18
+        if not mask.any():
+            return image
+
+        ys, xs = np.where(mask)
+        y_min, y_max = int(ys.min()), int(ys.max())
+        x_min, x_max = int(xs.min()), int(xs.max())
+
+        # Avoid over-cropping tiny noisy regions
+        if (x_max - x_min) < image.width * 0.25 or (y_max - y_min) < image.height * 0.25:
+            return image
+
+        # PIL crop uses exclusive max bounds
+        return image.crop((x_min, y_min, x_max + 1, y_max + 1))
 
     def _analyze_content_region(self, image: Image.Image) -> tuple[float, bool]:
         """Analyze the content region for video-like characteristics.
@@ -187,25 +206,29 @@ class ContentDetector:
         Returns:
             ContentAnalysis with detected content characteristics.
         """
-        # Check for black screen first
-        if is_mostly_black(frame, threshold=0.7):
+        # Focus on active content area so mirror window chrome/letterboxing
+        # doesn't break black-screen and vertical-video classification.
+        content_frame = self._extract_active_content_area(frame)
+
+        # Check for black screen first (on active content area)
+        if is_mostly_black(content_frame, threshold=0.8):
             return ContentAnalysis(
                 content_type=ContentType.BLACK_SCREEN,
                 confidence=0.9,
                 aspect_ratio=0.0,
                 entropy=0.0,
                 is_vertical_video=False,
-                hash_value=self._compute_hash(frame),
+                hash_value=self._compute_hash(content_frame),
             )
 
         # Analyze aspect ratio
-        aspect_ratio, is_vertical = self._analyze_aspect_ratio(frame)
+        aspect_ratio, is_vertical = self._analyze_aspect_ratio(content_frame)
 
         # Analyze content entropy
-        entropy, is_video_like = self._analyze_content_region(frame)
+        entropy, is_video_like = self._analyze_content_region(content_frame)
 
         # Compute hash for comparison
-        hash_value = self._compute_hash(frame)
+        hash_value = self._compute_hash(content_frame)
 
         # Determine content type
         if is_vertical and is_video_like:

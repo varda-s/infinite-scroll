@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 Examples:
   # Start the web UI (default)
-  python -m src.main
+  python3 -m src.main
 
   # Start in CLI mode
   python -m src.main --cli
@@ -67,8 +67,8 @@ Examples:
     parser.add_argument(
         "--fps",
         type=int,
-        default=10,
-        help="Capture frame rate (default: 10)",
+        default=20,
+        help="Capture frame rate (default: 20)",
     )
 
     # Detection settings

@@ -37,11 +37,12 @@ class TestDeviceDetectorWithMirrors:
 
     def test_detect_all_devices_includes_mirrors(self):
         """Test detect_all_devices includes mirror sources."""
-        with patch.object(MirrorDetector, "detect_mirror_windows") as mock_detect:
+        with patch.object(MirrorDetector, "detect_reeldetector_windows") as mock_detect, \
+             patch.object(MirrorDetector, "is_stream_active", return_value=True):
             source = MirrorSource(
                 window_id=1,
-                window_name="iPhone",
-                app_name="QuickTime Player",
+                window_name="ReelTracker",
+                app_name="uxplay",
                 bounds=(0, 0, 400, 800),
             )
             mock_detect.return_value = [source]
@@ -54,11 +55,12 @@ class TestDeviceDetectorWithMirrors:
 
     def test_get_preferred_device_returns_mirror(self):
         """Test get_preferred_device returns mirror device."""
-        with patch.object(MirrorDetector, "detect_mirror_windows") as mock_detect:
+        with patch.object(MirrorDetector, "detect_reeldetector_windows") as mock_detect, \
+             patch.object(MirrorDetector, "is_stream_active", return_value=True):
             source = MirrorSource(
                 window_id=1,
-                window_name="iPhone",
-                app_name="QuickTime Player",
+                window_name="ReelTracker",
+                app_name="uxplay",
                 bounds=(0, 0, 400, 800),
             )
             mock_detect.return_value = [source]
@@ -76,8 +78,8 @@ class TestMirrorCaptureIntegration:
         """Test MirrorCapture works as context manager."""
         source = MirrorSource(
             window_id=1,
-            window_name="iPhone",
-            app_name="QuickTime Player",
+            window_name="ReelTracker",
+            app_name="uxplay",
             bounds=(100, 100, 400, 800),
         )
 
@@ -92,8 +94,8 @@ class TestMirrorCaptureIntegration:
         """Test capture_screen with a mock mirror source."""
         source = MirrorSource(
             window_id=1,
-            window_name="iPhone",
-            app_name="QuickTime Player",
+            window_name="ReelTracker",
+            app_name="uxplay",
             bounds=(100, 100, 400, 800),
         )
         capture = MirrorCapture(mirror_source=source)
@@ -116,17 +118,18 @@ class TestEndToEndMirrorFlow:
     def test_full_detection_to_capture_flow(self):
         """Test the full flow from detection to capture setup."""
         # Mock a detected mirror window
-        with patch.object(MirrorDetector, "detect_mirror_windows") as mock_detect:
+        with patch.object(MirrorDetector, "detect_reeldetector_windows") as mock_detect, \
+             patch.object(MirrorDetector, "is_stream_active", return_value=True):
             source = MirrorSource(
                 window_id=1,
-                window_name="iPhone 15 Pro",
-                app_name="QuickTime Player",
+                window_name="ReelTracker",
+                app_name="uxplay",
                 bounds=(100, 100, 400, 800),
             )
             mock_detect.return_value = [source]
 
             # Step 1: Detect mirrors
-            mirrors = MirrorDetector.detect_mirror_windows()
+            mirrors = MirrorDetector.detect_reeldetector_windows()
             assert len(mirrors) == 1
 
             # Step 2: Get device from detector

@@ -3,16 +3,19 @@
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 import numpy as np
 
 from src.config import Config
+from src.capture.base import BaseCapture, DeviceInfo, DeviceType, ForegroundApp
 from src.capture.mock_capture import MockCapture
 from src.printing.mock_printer import MockPrinter
 from src.orchestrator import Orchestrator
 from src.tracking.time_tracker import ReelSession
+from src.detection.reel_detector import ReelChangeType
 
 
 class TestOrchestratorIntegration:
@@ -56,6 +59,8 @@ class TestOrchestratorIntegration:
             capture=capture,
             printer=printer,
             config=config,
+            use_content_detection=False,
+            manual_session_start=True,
         )
 
         assert orchestrator is not None
@@ -267,3 +272,155 @@ class TestOrchestratorIntegration:
         assert "SESSION COMPLETE" in content  # Summary
         assert "Total reels viewed:" in content
         assert "THANK YOU FOR SCROLLING" in content  # Thank you message
+
+    def test_manual_session_tracks_reel_changes_in_mirror_mode(
+        self, temp_dir: Path
+    ) -> None:
+        """Test manual session start still auto-detects reel changes in mirror mode."""
+        mirror_images = temp_dir / "mirror_images"
+        mirror_images.mkdir()
+
+        # Create vertical, high-entropy frames with clear differences.
+        for i in range(8):
+            arr = np.random.randint(0, 255, (1920, 1080, 3), dtype=np.uint8)
+            arr[:, i * 100:(i + 1) * 100, :] = (i * 30) % 255
+            Image.fromarray(arr).save(mirror_images / f"frame_{i:03d}.png")
+
+        config = Config(
+            output_dir=temp_dir,
+            capture_fps=60,
+            min_reel_duration=0,
+            hash_threshold=6,
+        )
+        capture = MockCapture(source=mirror_images, loop=True, instagram_mode=False)
+        capture._device_info.connection_type = "mirror"
+        printer = MockPrinter(output_dir=temp_dir, verbose=False)
+
+        orchestrator = Orchestrator(
+            capture=capture,
+            printer=printer,
+            config=config,
+        )
+
+        thread = threading.Thread(target=orchestrator.run)
+        thread.start()
+        time.sleep(1.2)
+        orchestrator.stop()
+        thread.join(timeout=5)
+
+        content = printer.get_receipt_content()
+        assert "INSTAGRAM REEL TRACKER" in content
+        assert "REEL #" in content
+
+    def test_session_ends_when_mirror_disconnects(self, temp_dir: Path) -> None:
+        """Test active session ends automatically if mirror stream disconnects."""
+        class DisconnectingMirrorCapture(BaseCapture):
+            def __init__(self) -> None:
+                self._connected = False
+                self._frames_left = 8
+                self._device_info = DeviceInfo(
+                    device_type=DeviceType.IOS,
+                    device_id="mirror:test",
+                    device_name="Test Mirror",
+                    model="uxplay",
+                    connection_type="mirror",
+                )
+
+            @property
+            def device_info(self) -> DeviceInfo:
+                return self._device_info
+
+            @property
+            def is_connected(self) -> bool:
+                return self._connected
+
+            def connect(self) -> bool:
+                self._connected = True
+                return True
+
+            def disconnect(self) -> None:
+                self._connected = False
+
+            def capture_screen(self) -> Image.Image | None:
+                if not self._connected:
+                    return None
+                if self._frames_left <= 0:
+                    # Simulate mirror disconnect.
+                    self._connected = False
+                    return None
+                self._frames_left -= 1
+                arr = np.random.randint(0, 255, (1920, 1080, 3), dtype=np.uint8)
+                return Image.fromarray(arr)
+
+            def get_foreground_app(self) -> ForegroundApp | None:
+                return ForegroundApp(package_name="com.instagram.android", activity="reels")
+
+        config = Config(
+            output_dir=temp_dir,
+            capture_fps=30,
+            min_reel_duration=0,
+            hash_threshold=5,
+        )
+        capture = DisconnectingMirrorCapture()
+        printer = MockPrinter(output_dir=temp_dir, verbose=False)
+        orchestrator = Orchestrator(capture=capture, printer=printer, config=config)
+
+        thread = threading.Thread(target=orchestrator.run)
+        thread.start()
+        thread.join(timeout=8)
+
+        assert not thread.is_alive()
+        content = printer.get_receipt_content()
+        assert "SESSION COMPLETE" in content
+
+    def test_reel_number_advances_from_current_reel_not_completed_count(
+        self, temp_dir: Path, varying_images_dir: Path
+    ) -> None:
+        """First swipe must move from reel #1 to reel #2 (no duplicate #1)."""
+        config = Config(output_dir=temp_dir, capture_fps=30, min_reel_duration=0)
+        capture = MockCapture(source=varying_images_dir, loop=False)
+        printer = MockPrinter(output_dir=temp_dir, verbose=False)
+        orchestrator = Orchestrator(capture=capture, printer=printer, config=config)
+
+        class _FakeTracker:
+            def __init__(self) -> None:
+                self.current_reel = None
+                self.started: list[int] = []
+
+            def get_reel_count(self) -> int:
+                # Simulate a tracker where current reel is not counted yet.
+                return 0
+
+            def start_new_reel(self, reel_number: int, screenshot=None):
+                self.started.append(reel_number)
+                self.current_reel = SimpleNamespace(reel_number=reel_number)
+                return None
+
+            def update_screenshot(self, screenshot) -> None:
+                return None
+
+            def get_current_duration(self) -> float:
+                return 0.0
+
+            def get_total_time(self) -> float:
+                return 0.0
+
+        class _FakeDetector:
+            def __init__(self, screenshot: Image.Image) -> None:
+                self.last_screenshot = screenshot
+
+            def process_frame(self, frame: Image.Image):
+                return ReelChangeType.NEW_REEL
+
+            def is_stable(self) -> bool:
+                return False
+
+        fake_tracker = _FakeTracker()
+        orchestrator.time_tracker = fake_tracker  # type: ignore[assignment]
+        sample_frame = Image.new("RGB", (1080, 1920), color=(20, 20, 20))
+        orchestrator.reel_detector = _FakeDetector(sample_frame)  # type: ignore[assignment]
+
+        orchestrator._process_frame(sample_frame)
+        orchestrator._process_frame(sample_frame)
+
+        assert fake_tracker.started == [1, 2]

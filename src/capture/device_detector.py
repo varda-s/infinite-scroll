@@ -8,9 +8,9 @@ class DeviceDetector:
 
     @staticmethod
     def detect_mirror_devices() -> list[DeviceInfo]:
-        """Detect iPhones via screen mirroring (QuickTime, etc.).
+        """Detect ReelTracker booth mirrors (uxplay/GStreamer).
 
-        No developer mode required - just needs screen mirroring active.
+        This intentionally excludes iPhone Mirroring/QuickTime and other mirrors.
 
         Returns:
             List of detected mirror sources as DeviceInfo.
@@ -20,9 +20,13 @@ class DeviceDetector:
         try:
             from src.capture.mirror_capture import MirrorDetector
 
-            mirrors = MirrorDetector.detect_mirror_windows()
+            mirrors = MirrorDetector.detect_reeldetector_windows()
 
             for mirror in mirrors:
+                # Only expose devices that appear to have an active mirrored stream.
+                if not MirrorDetector.is_stream_active(mirror):
+                    continue
+
                 devices.append(
                     DeviceInfo(
                         device_type=DeviceType.IOS,
@@ -38,7 +42,8 @@ class DeviceDetector:
         except Exception:
             pass
 
-        return devices
+        # Booth mode supports one mirrored participant at a time.
+        return devices[:1]
 
     @classmethod
     def detect_all_devices(cls) -> list[DeviceInfo]:

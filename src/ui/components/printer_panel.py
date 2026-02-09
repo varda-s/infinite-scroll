@@ -89,36 +89,41 @@ def create_printer_panel(
 
         ui.separator().classes("my-3")
 
-        # Session control buttons
-        button_container = ui.column().classes("w-full gap-2")
+        # Session control buttons (stable elements to avoid listener churn warnings)
+        with ui.column().classes("w-full gap-2"):
+            start_btn = ui.button(
+                "Start Session",
+                icon="play_arrow",
+                on_click=on_start_session,
+            ).classes("w-full")
+            stop_btn = ui.button(
+                "Stop Session",
+                icon="stop",
+                on_click=on_stop_session,
+            ).classes("w-full bg-red-500").props("color=negative")
 
-        def update_buttons():
-            button_container.clear()
-            with button_container:
-                if app_state.session_active:
-                    ui.button(
-                        "Stop Session",
-                        icon="stop",
-                        on_click=on_stop_session,
-                    ).classes("w-full bg-red-500").props("color=negative")
-                else:
-                    has_device = app_state.connected_device is not None
-                    start_btn = ui.button(
-                        "Start Session",
-                        icon="play_arrow",
-                        on_click=on_start_session,
-                    ).classes("w-full")
+        last_state: tuple[bool, bool] | None = None
 
-                    if not has_device:
-                        start_btn.disable()
-                        start_btn.tooltip("Connect a device first")
-                    else:
-                        start_btn.props("color=positive")
+        def update_buttons() -> None:
+            nonlocal last_state
+            has_device = app_state.connected_device is not None
+            current_state = (app_state.session_active, has_device)
+            if current_state == last_state:
+                return
+            last_state = current_state
 
-        # Initial render
+            if app_state.session_active:
+                start_btn.set_visibility(False)
+                stop_btn.set_visibility(True)
+            else:
+                stop_btn.set_visibility(False)
+                start_btn.set_visibility(True)
+                # Keep Start enabled so booth operators can click once and let
+                # tracking service wait for/attach to the ReelTracker mirror.
+                start_btn.enable()
+                start_btn.props("color=positive" if has_device else "color=primary")
+
         update_buttons()
-
-        # Register for state updates
-        app_state.add_update_callback(update_buttons)
+        ui.timer(0.1, update_buttons)
 
     return card

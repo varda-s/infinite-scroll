@@ -43,6 +43,7 @@ class TestTimeTracker:
         """Test default initialization."""
         tracker = TimeTracker()
         assert tracker.min_duration == 0.5
+        assert tracker.screenshot_update_window_seconds == 0.8
         assert not tracker.is_tracking
         assert tracker.current_reel is None
 
@@ -144,6 +145,23 @@ class TestTimeTracker:
 
         tracker.update_screenshot(sample_image)
         assert tracker.current_reel.screenshot is not None
+
+    def test_update_screenshot_ignored_after_early_window(
+        self, sample_image: Image.Image
+    ) -> None:
+        """Test screenshot updates are ignored once the early window has passed."""
+        tracker = TimeTracker(screenshot_update_window_seconds=0.01)
+        tracker.start_session()
+
+        tracker.start_new_reel(reel_number=1, screenshot=sample_image)
+        assert tracker.current_reel is not None
+        original = tracker.current_reel.screenshot
+
+        time_module.sleep(0.02)
+        replacement = Image.new("RGB", sample_image.size, color=(255, 0, 0))
+        tracker.update_screenshot(replacement)
+
+        assert tracker.current_reel.screenshot is original
 
     def test_get_current_duration(self, sample_image: Image.Image) -> None:
         """Test getting current reel duration."""

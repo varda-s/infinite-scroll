@@ -15,6 +15,7 @@ from src.ui.components.auth import create_login_page, create_signup_page, requir
 from src.ui.components.sidebar import create_sidebar, create_header_with_menu
 from src.ui.components.history_page import create_history_page
 from src.ui.services.device_service import device_service
+from src.ui.services.media_paths import OUTPUT_ROOT
 from src.ui.services.tracking_service import tracking_service
 from src.ui.state import app_state
 
@@ -75,6 +76,30 @@ def create_dashboard() -> None:
             with ui.row().classes("items-center gap-2"):
                 ui.icon("videocam").classes("text-2xl text-white")
                 ui.label("Instagram Reel Tracker").classes("text-xl font-bold text-white")
+                pairing_badge = ui.label("").classes("text-xs px-2 py-1 rounded bg-white/20 text-white")
+
+                def update_pairing_badge() -> None:
+                    if app_state.connected_device:
+                        pairing_badge.text = "Device Paired"
+                        pairing_badge.classes(
+                            remove="bg-red-500/70",
+                            add="bg-green-500/70",
+                        )
+                    elif app_state.uxplay_pairing_code:
+                        pairing_badge.text = f"Pairing Ready PIN {app_state.uxplay_pairing_code}"
+                        pairing_badge.classes(
+                            remove="bg-red-500/70",
+                            add="bg-green-500/70",
+                        )
+                    else:
+                        pairing_badge.text = "Pairing Initializing"
+                        pairing_badge.classes(
+                            remove="bg-green-500/70",
+                            add="bg-red-500/70",
+                        )
+
+                update_pairing_badge()
+                ui.timer(0.5, update_pairing_badge)
 
             # Right: spacer
             ui.element("div").classes("w-10")
@@ -89,14 +114,22 @@ def create_dashboard() -> None:
                 status_label.text = "Recording... Scroll through Reels!"
                 status_label.classes(remove="text-gray-500 text-yellow-600", add="text-green-600")
             elif app_state.connected_device:
-                status_label.text = "Device connected! Click Start Session or open Instagram Reels."
+                status_label.text = "ReelTracker mirror connected. Click Start Session, then scroll Reels."
                 status_label.classes(remove="text-gray-500 text-green-600", add="text-yellow-600")
             else:
-                status_label.text = "Waiting for device... Start iPhone Mirroring or AirPlay to uxplay."
+                if app_state.connected_device:
+                    status_label.text = "ReelTracker mirror connected. Click Start Session, then scroll Reels."
+                elif app_state.uxplay_pairing_code:
+                    status_label.text = (
+                        "Waiting for ReelTracker mirror... connect via AirPlay "
+                        f"with PIN {app_state.uxplay_pairing_code}."
+                    )
+                else:
+                    status_label.text = "Waiting for ReelTracker mirror... starting uxplay."
                 status_label.classes(remove="text-yellow-600 text-green-600", add="text-gray-500")
 
         update_status()
-        ui.timer(1.0, update_status)
+        ui.timer(0.5, update_status)
 
         # Top row: Device/Printer panels and Live Session
         with ui.row().classes("w-full gap-4"):
@@ -119,16 +152,12 @@ def create_dashboard() -> None:
 
 def on_start_session() -> None:
     """Handle start session button click."""
-    if app_state.connected_device is None:
-        ui.notify("No device connected", type="warning")
-        return
-
     # Start session without user association (booth mode)
     success = tracking_service.start_session(user_id=None)
     if success:
-        ui.notify("Session started! Open Instagram Reels and start scrolling.", type="positive")
+        ui.notify("Session started. Scroll Reels to track timings and print live receipt.", type="positive")
     else:
-        ui.notify("Failed to start session", type="negative")
+        ui.notify("Failed to start session. Connect ReelTracker mirror first.", type="negative")
 
 
 def on_stop_session() -> None:
@@ -167,6 +196,17 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     """
     # Enable storage for user sessions
     app.storage.secret = "instagram-reel-tracker-secret-key"
+
+    # Ensure pairing is ready before serving UI so users immediately see a PIN.
+    if not device_service.ensure_pairing_ready(timeout_seconds=3.0):
+        raise RuntimeError(
+            "Failed to initialize ReelTracker pairing within 3 seconds. "
+            "Check uxplay availability and try again."
+        )
+
+    # Serve output media (screenshots/replays) as browser-accessible static files.
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    app.add_static_files("/output", str(OUTPUT_ROOT))
 
     # Register startup/shutdown handlers
     app.on_startup(startup)

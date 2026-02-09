@@ -1,5 +1,6 @@
 """Auto-launch iPhone mirroring apps for touchless experience."""
 
+import secrets
 import subprocess
 import time
 from pathlib import Path
@@ -171,6 +172,8 @@ class MirrorLauncher:
     @classmethod
     def is_uxplay_available(cls) -> bool:
         """Check if uxplay is installed."""
+        if cls.LOCAL_UXPLAY_BIN.exists():
+            return True
         try:
             result = subprocess.run(
                 ["which", "uxplay"],
@@ -188,17 +191,81 @@ class MirrorLauncher:
         Returns:
             The subprocess handle, or None if failed.
         """
+        return cls.launch_uxplay_with_pin()
+
+    @classmethod
+    def generate_pairing_pin(cls) -> str:
+        """Generate a 4-digit PIN for uxplay pairing."""
+        return f"{secrets.randbelow(10000):04d}"
+
+    @classmethod
+    def launch_uxplay_with_pin(
+        cls,
+        *,
+        server_name: str = "ReelTracker",
+        pin: Optional[str] = None,
+        fps: int = 120,
+    ) -> tuple[Optional[subprocess.Popen], Optional[str]]:
+        """Launch uxplay with a PIN requirement.
+
+        Args:
+            server_name: AirPlay name shown to clients.
+            pin: Optional 4-digit fixed pin (random generated if omitted).
+            fps: Max mirrored stream fps.
+
+        Returns:
+            (process, pin) tuple. If launch fails, both values are None.
+        """
         if not cls.is_uxplay_available():
-            return None
+            return None, None
 
         try:
-            # Launch uxplay in the background
-            # uxplay creates its own window for the AirPlay stream
+            pairing_pin = pin or cls.generate_pairing_pin()
+
+            binary = str(cls.LOCAL_UXPLAY_BIN) if cls.LOCAL_UXPLAY_BIN.exists() else "uxplay"
+            cwd = str(cls.LOCAL_UXPLAY_CWD) if cls.LOCAL_UXPLAY_CWD.exists() else None
+
+            # Prevent stale/manual ReelTracker uxplay instances from competing for
+            # AirPlay discovery and bypassing the expected PIN flow.
+            try:
+                subprocess.run(
+                    ["pkill", "-f", "uxplay -n ReelTracker"],
+                    capture_output=True,
+                    timeout=2,
+                )
+                time.sleep(0.2)
+            except Exception:
+                pass
+
+            # Use files instead of PIPEs to avoid blocking if buffers fill.
+            log_dir = Path("output")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stdout_log = open(log_dir / "uxplay.stdout.log", "a")
+            stderr_log = open(log_dir / "uxplay.stderr.log", "a")
+
+            # Require explicit PIN so random nearby clients cannot join.
             process = subprocess.Popen(
-                ["uxplay", "-n", "ReelTracker"],  # -n sets the AirPlay name
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                [
+                    binary,
+                    "-n",
+                    server_name,
+                    "-pin",
+                    pairing_pin,
+                    "-fps",
+                    str(fps),
+                ],
+                cwd=cwd,
+                stdout=stdout_log,
+                stderr=stderr_log,
             )
-            return process
+            stdout_log.close()
+            stderr_log.close()
+            # Ensure process stays alive long enough to advertise.
+            time.sleep(0.7)
+            if process.poll() is not None:
+                return None, None
+            return process, pairing_pin
         except Exception:
-            return None
+            return None, None
+    LOCAL_UXPLAY_BIN = Path("/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay")
+    LOCAL_UXPLAY_CWD = Path("/Users/amanagarwal/Desktop/Stanford/UxPlay")

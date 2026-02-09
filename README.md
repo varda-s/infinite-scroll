@@ -1,364 +1,202 @@
 # Instagram Reel Tracker
 
-Track your Instagram Reel scrolling and print receipts showing how much time you spent on each reel.
+Track Instagram Reel viewing time from an iPhone mirror feed, print a live reel receipt, and review replay/history in a web dashboard.
 
-## Architecture: Connectors
+## What This App Does
 
-The app uses a **connector pattern** to bridge your phone to the application. Each connector:
-- Captures the phone screen
-- Detects when a reel scrolling session starts
-- Detects when the user scrolls to the next reel
+- Runs a NiceGUI web app at `http://127.0.0.1:8080`.
+- Starts and manages `uxplay` automatically from Python (no second terminal needed).
+- Generates a rotating 4-digit AirPlay PIN for pairing.
+- Accepts only **ReelTracker** mirror sources (booth mode, one mirrored device at a time).
+- Lets operator/user manually click **Start Session** and **Stop Session**.
+- Auto-detects reel transitions while session is running.
+- Tracks per-reel duration and total session time in real time.
+- Shows a live receipt stream during active session.
+- Stores session data in SQLite.
+- Stores reel screenshots and generates a replay video that mimics receipt printing.
+- Session history updates automatically (no refresh button required).
+- Session history includes:
+  - stats cards
+  - searchable table with preview/status/actions
+  - replay + receipt text modal
+  - charts for day-level and time-of-day usage
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         CONNECTOR LAYER                              │
-│                                                                      │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │              BaseCapture (Interface)                         │   │
-│   │  - capture_screen() → PIL Image                              │   │
-│   │  - get_foreground_app() → App info                           │   │
-│   │  - connect() / disconnect()                                  │   │
-│   └─────────────────────────────────────────────────────────────┘   │
-│                              │                                       │
-│              ┌───────────────┴───────────────┐                      │
-│              ▼                               ▼                      │
-│   ┌─────────────────────┐         ┌─────────────────────┐          │
-│   │   MirrorCapture     │         │    MockCapture      │          │
-│   │   (iPhone → Mac)    │         │    (Testing)        │          │
-│   │                     │         │                     │          │
-│   │  Uses QuickTime to  │         │  Uses video files   │          │
-│   │  mirror iPhone      │         │  or image dirs      │          │
-│   └─────────────────────┘         └─────────────────────┘          │
-│                                                                      │
-│   Future connectors can be added by implementing BaseCapture        │
-└─────────────────────────────────────────────────────────────────────┘
-```
+## Supported Mirroring Mode
 
-### Current Connector: iPhone-to-Mac Mirroring
+This project is configured for a kiosk/booth workflow:
 
-The primary connector supports two mirroring methods:
+- Supported: **AirPlay to `ReelTracker` (uxplay)**
+- Not used for booth detection: macOS iPhone Mirroring app / QuickTime mirror windows
 
-#### Option 1: iPhone Mirroring (Wireless - Recommended)
+Code path intentionally filters to ReelTracker-compatible mirror sources.
 
-**Requirements:** macOS 15 (Sequoia) or later, iOS 18 or later, same Apple ID on both devices
+## Prerequisites
 
-1. **Open iPhone Mirroring** app on your Mac (in Applications)
-2. Follow the setup prompts if this is your first time
-3. Your iPhone screen appears wirelessly on your Mac!
+- macOS (Apple Silicon or Intel)
+- Python `3.10+`
+- iPhone with Screen Mirroring / AirPlay capability
+- `uxplay` available either:
+  - at `/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay`, or
+  - on `PATH` as `uxplay`
 
-Benefits:
-- Completely wireless - no cable needed
-- Built into macOS, no extra software
-- Low latency, high quality
-
-#### Option 2: QuickTime Player (USB Fallback)
-
-**Requirements:** Any macOS version, USB cable
-
-This approach:
-- Requires no developer mode or special setup on iPhone
-- Just needs a USB cable and trust confirmation
-- Works with any iPhone
-
-## Quick Start
-
-### 1. Clone and Install
+## Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
+git clone <your-repo-url>
 cd infinite-scroll
 
-# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-The database is automatically created on first run in the `data/` directory.
+## Install / Build UxPlay
 
-### 2. Connect Your iPhone
+If `uxplay` is not already installed, build it once:
 
-**No developer mode required!** Choose one of these methods:
+```bash
+cd /Users/amanagarwal/Desktop/Stanford
+git clone https://github.com/antimof/UxPlay.git
+cd UxPlay
+cmake .
+make
+sudo make install
+```
 
-#### Wireless (macOS 15+ / iOS 18+)
+Optional check:
 
-1. **Open iPhone Mirroring** app on your Mac
-2. Your iPhone screen appears wirelessly!
-3. Session will auto-start when you open Instagram Reels
+```bash
+uxplay -h
+```
 
-#### USB (Any macOS)
+## Run The App
 
-1. **Plug your iPhone into your Mac via USB cable**
-2. **Tap "Trust"** when your iPhone asks "Trust This Computer?"
-3. **Open QuickTime Player** on your Mac
-4. Go to **File → New Movie Recording**
-5. Click the **small arrow** next to the record button
-6. Select your **iPhone** under "Camera"
-7. Your iPhone screen now appears in QuickTime!
-
-### 3. Start the App
+From this project directory:
 
 ```bash
 source venv/bin/activate
 python -m src.main
 ```
 
-Open **http://localhost:8080** in your browser.
+The app starts at:
 
-### 4. Start Tracking
+- [http://127.0.0.1:8080](http://127.0.0.1:8080)
 
-1. Your iPhone should appear in the **Devices** panel as a "Screen Mirror"
-2. Select your printer (Mock for on-screen, Rongta for thermal printer)
-3. Click **"Start Session"**
-4. Open Instagram on your iPhone and scroll through Reels
-5. Watch the receipts build in real-time!
-6. Click **"Stop Session"** when done
+On startup, the app ensures pairing is ready before serving UI.
 
-## How It Works
+## iPhone Mirroring (How To Pair)
 
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Your iPhone   │────▶│ QuickTime Mirror│────▶│   Reel Tracker  │
-│   (Instagram)   │ USB │   (on your Mac) │     │   (this app)    │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-                                                        │
-                                                        ▼
-                                                ┌─────────────────┐
-                                                │  Receipt Printer│
-                                                │  (or on-screen) │
-                                                └─────────────────┘
-```
+1. Start the app and open the dashboard.
+2. Wait for the UI to show a pairing PIN (status badge / Devices panel).
+3. On iPhone, open **Control Center → Screen Mirroring**.
+4. Select **`ReelTracker`**.
+5. Enter the PIN shown in UI.
+6. Confirm UI shows **Device Paired**.
 
-The app:
-1. Captures your iPhone screen from the QuickTime window
-2. Detects when you scroll to a new Reel (using image analysis / perceptual hashing)
-3. Times how long you spend on each Reel
-4. Prints a receipt showing your scrolling habits
+## Session Workflow
 
-## Reel Detection
+1. Pair iPhone to `ReelTracker`.
+2. Click **Start Session**.
+3. Open Instagram Reels on phone and scroll.
+4. Watch live updates:
+   - current reel number
+   - current reel timer
+   - total reels/time
+   - live receipt cards
+5. End by:
+   - clicking **Stop Session**, or
+   - disconnecting mirror
 
-The connector provides screen captures that are analyzed to detect:
+After session end, pairing is rotated so next user gets a fresh PIN.
 
-1. **Session Start**: When the user enters Instagram Reels mode
-2. **New Reel**: When the user scrolls to the next reel (detected via perceptual hash comparison)
-3. **Session End**: When the user leaves Reels mode
+## Output / Storage
 
-### Auto Session Detection (Mirror Mode)
+- Database: `data/reel_tracker.db`
+- Session screenshots: `output/sessions/session_<id>/reel_<nnnn>.png`
+- Replay videos: `output/replays/session_<id>.mp4`
+- Replay metadata: `output/replays/session_<id>.json`
+- UxPlay logs:
+  - `output/uxplay.stdout.log`
+  - `output/uxplay.stderr.log`
 
-When using screen mirroring (iPhone Mirroring or QuickTime), the app uses **content-based detection** to automatically:
+## Replay Format
 
-- **Detect when you open Reels**: Analyzes screen content for vertical video patterns
-- **Detect when you leave Reels**: Notices dramatic content changes or screen lock
-- **Track reel changes**: Uses perceptual hashing (pHash) to detect scrolling
+Session replay is rendered as a receipt-style print animation:
 
-This means you don't need to manually start/stop sessions - just open Instagram Reels and start scrolling!
+- header print
+- per-reel timing hold
+- per-reel printed block with screenshot centered
+- session summary print
 
-**How it works:**
-- Vertical aspect ratio (9:16) detection
-- High entropy content analysis (video vs static UI)
-- Perceptual hash comparison for reel transitions
-- Black screen detection for session end
+Video is normalized to browser-friendly H.264 for UI playback.
 
-This detection logic is built on top of the connector's `capture_screen()` method and works identically for both wireless and USB mirroring.
-
-## Dashboard
-
-```
-+----------------------------------------------------------+
-|               INSTAGRAM REEL TRACKER                       |
-+----------------------------------------------------------+
-|                                                            |
-|  +----------------+  +----------------------------------+  |
-|  |    DEVICES     |  |         LIVE SESSION             |  |
-|  +----------------+  +----------------------------------+  |
-|  | iPhone         |  |  Status: Recording               |  |
-|  | (Screen Mirror)|  |  Reel #: 5  |  Time: 12.3s       |  |
-|  |                |  |  Total: 5 reels  |  2m 45s       |  |
-|  +----------------+  +----------------------------------+  |
-|  |    PRINTER     |  |  +----------------------------+  |  |
-|  +----------------+  |  |     LIVE RECEIPT          |  |  |
-|  | (*) Mock       |  |  | ========================  |  |  |
-|  | ( ) Rongta     |  |  | INSTAGRAM REEL TRACKER    |  |  |
-|  +----------------+  |  | Session: 2024-01-15...    |  |  |
-|  | [Start Session]|  |  | REEL #5                   |  |  |
-|  | [Stop Session] |  |  | Time: 8.2s                |  |  |
-|  +----------------+  |  +----------------------------+  |  |
-+----------------------------------------------------------+
-```
-
-## Sample Receipt
-
-```
-==========================================
-        INSTAGRAM REEL TRACKER
-==========================================
-  Session started: 2024-01-15 14:30:22
-------------------------------------------
-
-  REEL #1
-------------------------------------------
-  [ASCII art of screenshot]
-------------------------------------------
-  Time spent: 12.5s
-------------------------------------------
-
-  REEL #2
-  ...
-
-==========================================
-           SESSION COMPLETE
-==========================================
-  Total reels viewed: 15
-  Total time: 3m 45s
-  Avg time per reel: 15.0s
-------------------------------------------
-      THANK YOU FOR SCROLLING!
-
-   Maybe go outside for a bit? :)
-------------------------------------------
-==========================================
-```
-
-## Using a Thermal Printer
-
-The app supports Rongta thermal receipt printers:
-
-1. Connect the printer via USB
-2. Turn on the printer
-3. Select **"Rongta"** in the Printer panel
-4. Start a session and scroll!
-
-If the printer isn't detected, use Mock mode to test on-screen first.
-
-## Troubleshooting
-
-### iPhone not showing in Devices panel?
-
-1. Make sure QuickTime is open with your iPhone mirroring
-2. The QuickTime window must be visible (not minimized)
-3. Refresh the page or restart the app
-
-**Debug what windows are detected:**
-```bash
-python3 -c "from src.capture.mirror_capture import MirrorDetector; print(MirrorDetector.debug_all_windows())"
-```
-
-### QuickTime not showing my iPhone?
-
-1. Disconnect and reconnect the USB cable
-2. Unlock your iPhone
-3. Tap **"Trust"** if the trust prompt appears
-4. In QuickTime, click the dropdown arrow next to record and select your iPhone
-
-### No reels detected when scrolling?
-
-- Make sure you're in the **Reels tab** (full-screen vertical video mode)
-- The app only tracks when you're actively viewing Reels
-- Try scrolling slowly at first
-
-### Session won't start?
-
-- Wait for your device to appear in the Devices panel
-- The Start button is disabled until a device is detected
-
-## CLI Mode
-
-For power users:
+## CLI Mode (Optional)
 
 ```bash
-# CLI mode with mock printer
+# Run CLI mode
 python -m src.main --cli
 
-# CLI mode with Rongta printer
-python -m src.main --cli --printer rongta
+# CLI with mock capture source
+python -m src.main --cli --mock-capture /path/to/video_or_images
 
-# Test without a phone (uses sample images/video)
-python -m src.main --cli --mock-capture ./assets/test_images/
-python -m src.main --cli --mock-capture ./test_video.mp4
-
-# List connected devices
+# List detected mirror devices
 python -m src.main --list-devices
 
 # List USB printers
 python -m src.main --list-printers
 ```
 
-## Adding New Connectors
-
-To add support for a new phone connection method:
-
-1. Create a new class that implements `BaseCapture` (see `src/capture/base.py`)
-2. Implement the required methods:
-   - `capture_screen()`: Return a PIL Image of the phone screen
-   - `get_foreground_app()`: Return info about the current app (if possible)
-   - `connect()` / `disconnect()`: Handle connection lifecycle
-3. Register the connector in `src/capture/__init__.py`
-
-Example connector interface:
-
-```python
-from src.capture.base import BaseCapture, DeviceInfo, ForegroundApp
-from PIL import Image
-
-class MyNewConnector(BaseCapture):
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return device information."""
-        ...
-
-    @property
-    def is_connected(self) -> bool:
-        """Check if connected."""
-        ...
-
-    def connect(self) -> bool:
-        """Establish connection. Return True on success."""
-        ...
-
-    def disconnect(self) -> None:
-        """Close connection."""
-        ...
-
-    def capture_screen(self) -> Image.Image | None:
-        """Capture and return the current screen."""
-        ...
-
-    def get_foreground_app(self) -> ForegroundApp | None:
-        """Get foreground app info (optional)."""
-        ...
-```
-
-## Requirements
-
-- **macOS** (required for screen mirroring)
-  - macOS 15+ (Sequoia) for wireless iPhone Mirroring
-  - Any macOS version for QuickTime USB mirroring
-- **Python 3.10+**
-- **iPhone**
-  - iOS 18+ for wireless iPhone Mirroring
-  - Any iOS version for QuickTime USB mirroring
-  - USB cable only needed for QuickTime method
-- **Rongta printer** (optional, for physical receipts)
-
-## Development
+## Testing
 
 ```bash
-# Install dev dependencies
-pip install -r requirements-dev.txt
+# all tests
+pytest
 
-# Run tests
-pytest tests/ -v
+# targeted replay/media tests
+pytest -q tests/unit/test_replay_service.py tests/unit/test_media_paths.py
 
-# Format code
-black src/ tests/
-
-# Lint
-ruff check src/ tests/
+# orchestrator regression test for reel numbering
+pytest -q tests/integration/test_orchestrator.py::TestOrchestratorIntegration::test_reel_number_advances_from_current_reel_not_completed_count
 ```
 
-## License
+## Troubleshooting
 
-MIT License
+### `Failed to initialize ReelTracker pairing`
+
+- Confirm `uxplay` is installed and runnable.
+- Confirm the binary is at expected path or on `PATH`.
+- Check logs in `output/uxplay.stderr.log`.
+
+### ReelTracker not visible on iPhone
+
+- Ensure app is running.
+- Ensure Mac/iPhone are on the same network for AirPlay.
+- If needed, click **Reset Pairing** in UI.
+
+### PIN keeps re-prompting
+
+- Make sure you are selecting `ReelTracker` (not another mirror target).
+- Reset pairing in UI and retry with the latest PIN.
+
+### Device shows disconnected unexpectedly
+
+- Keep mirror stream active.
+- If stream drops, pairing rotates by design; reconnect with fresh PIN.
+
+### Replay or screenshots not loading
+
+- Confirm files exist under `output/`.
+- Hard refresh browser.
+- Restart app if route state is stale.
+
+## Project Structure
+
+- `src/main.py`: app entrypoint (UI + CLI)
+- `src/ui/app.py`: NiceGUI routing and dashboard composition
+- `src/ui/services/device_service.py`: pairing/device polling lifecycle
+- `src/ui/services/tracking_service.py`: session orchestration bridge
+- `src/orchestrator.py`: capture loop + reel detection + tracker integration
+- `src/detection/reel_detector.py`: reel transition detection logic
+- `src/ui/services/replay_service.py`: replay generation
+- `src/ui/database/`: SQLModel schema/repositories
+

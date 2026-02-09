@@ -4,7 +4,8 @@ from nicegui import ui
 
 from src.printing.base import BasePrinter
 from src.ui.database.repository import SessionRepository
-from src.ui.components.receipt_viewer import show_receipt_modal
+from src.ui.components.receipt_viewer import show_session_detail_modal
+from src.ui.services.media_paths import to_media_url
 
 
 def create_session_history() -> ui.card:
@@ -16,18 +17,20 @@ def create_session_history() -> ui.card:
     with ui.card().classes("w-full") as card:
         with ui.row().classes("w-full items-center justify-between mb-4"):
             ui.label("SESSION HISTORY").classes("text-lg font-bold text-gray-700")
-            refresh_btn = ui.button(icon="refresh", on_click=lambda: update_table()).props(
-                "flat round"
-            )
-            refresh_btn.tooltip("Refresh history")
 
         table_container = ui.column().classes("w-full")
+        last_session_ids: tuple[int, ...] | None = None
 
         def update_table():
+            nonlocal last_session_ids
+            sessions = SessionRepository.get_all_sessions(limit=20)
+            session_ids = tuple(s.id for s in sessions)
+            if session_ids == last_session_ids:
+                return
+            last_session_ids = session_ids
+
             table_container.clear()
             with table_container:
-                sessions = SessionRepository.get_all_sessions(limit=20)
-
                 if not sessions:
                     with ui.column().classes("items-center justify-center py-8"):
                         ui.icon("history").classes("text-4xl text-gray-300")
@@ -40,6 +43,7 @@ def create_session_history() -> ui.card:
                 # Create table
                 columns = [
                     {"name": "date", "label": "Date/Time", "field": "date", "align": "left"},
+                    {"name": "preview", "label": "Preview", "field": "preview", "align": "center"},
                     {"name": "device", "label": "Device", "field": "device", "align": "left"},
                     {"name": "reels", "label": "Reels", "field": "reels", "align": "center"},
                     {"name": "duration", "label": "Duration", "field": "duration", "align": "center"},
@@ -51,10 +55,17 @@ def create_session_history() -> ui.card:
                 for session in sessions:
                     date_str = session.start_time.strftime("%Y-%m-%d %H:%M")
                     duration_str = BasePrinter.format_duration(session.total_time_seconds)
+                    receipts = SessionRepository.get_session_receipts(session.id)
+                    preview = None
+                    for receipt in receipts:
+                        if receipt.screenshot_path:
+                            preview = to_media_url(receipt.screenshot_path)
+                            break
 
                     rows.append({
                         "id": session.id,
                         "date": date_str,
+                        "preview": preview,
                         "device": f"{session.device_name} ({session.device_type})",
                         "reels": session.total_reels,
                         "duration": duration_str,
@@ -68,6 +79,18 @@ def create_session_history() -> ui.card:
                     rows=rows,
                     row_key="id",
                 ).classes("w-full")
+
+                table.add_slot(
+                    "body-cell-preview",
+                    """
+                    <q-td :props="props">
+                        <q-img v-if="props.row.preview"
+                               :src="props.row.preview"
+                               style="width: 40px; height: 72px; border-radius: 6px;" />
+                        <q-icon v-else name="image_not_supported" color="grey-5" />
+                    </q-td>
+                    """,
+                )
 
                 # Add slot for actions column
                 table.add_slot(
@@ -85,13 +108,13 @@ def create_session_history() -> ui.card:
 
                 def handle_view(e):
                     row = e.args
-                    if row and row.get("receipt"):
+                    if row:
                         session_info = row.get("date", "")
-                        show_receipt_modal(row["receipt"], session_info)
+                        show_session_detail_modal(row["id"], session_info)
 
                 table.on("view", handle_view)
 
-        # Initial render
         update_table()
+        ui.timer(1.0, update_table)
 
     return card

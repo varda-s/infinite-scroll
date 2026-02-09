@@ -52,15 +52,19 @@ class TimeTracker:
     def __init__(
         self,
         min_duration: float = 0.5,
+        screenshot_update_window_seconds: float = 0.8,
         on_reel_complete: Callable[[ReelSession], None] | None = None,
     ) -> None:
         """Initialize time tracker.
 
         Args:
             min_duration: Minimum duration to count as a valid reel view.
+            screenshot_update_window_seconds: Only allow screenshot replacement
+                during this early window after reel start.
             on_reel_complete: Callback when a reel viewing is complete.
         """
         self.min_duration = min_duration
+        self.screenshot_update_window_seconds = screenshot_update_window_seconds
         self.on_reel_complete = on_reel_complete
 
         self._current_reel: ReelSession | None = None
@@ -147,7 +151,10 @@ class TimeTracker:
         Args:
             screenshot: New screenshot to save.
         """
-        if self._current_reel:
+        if (
+            self._current_reel
+            and self._current_reel.duration <= self.screenshot_update_window_seconds
+        ):
             self._current_reel.screenshot = screenshot
 
     def _end_current_reel(self) -> ReelSession | None:

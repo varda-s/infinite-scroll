@@ -126,6 +126,21 @@ class TestContentDetector:
         result = detector.is_reels_content(video_like_image)
         assert isinstance(result, bool)
 
+    def test_letterboxed_vertical_content_detected_as_reels(self) -> None:
+        """Test letterboxed mirror frames still classify vertical video correctly."""
+        detector = ContentDetector()
+
+        # Build a landscape "window" frame with a vertical video area in the center
+        frame = np.zeros((900, 1600, 3), dtype=np.uint8)
+        vertical_content = np.random.randint(0, 255, (820, 460, 3), dtype=np.uint8)
+        y0, x0 = 40, 570
+        frame[y0:y0 + 820, x0:x0 + 460, :] = vertical_content
+
+        image = Image.fromarray(frame)
+        analysis = detector.analyze_frame(image)
+
+        assert analysis.content_type == ContentType.REELS
+
 
 class TestSessionStateTransitions:
     """Tests for session state transitions in ContentDetector."""

@@ -29,7 +29,9 @@ class Orchestrator:
         on_reel_change: Callable[[ReelSession], None] | None = None,
         on_session_start: Callable[[], None] | None = None,
         on_session_end: Callable[[int, float, str], None] | None = None,
+        on_live_progress: Callable[[int, float, float], None] | None = None,
         use_content_detection: bool = True,
+        manual_session_start: bool = False,
     ) -> None:
         """Initialize orchestrator.
 
@@ -40,7 +42,10 @@ class Orchestrator:
             on_reel_change: Optional callback for reel changes.
             on_session_start: Optional callback when session starts.
             on_session_end: Optional callback when session ends (total_reels, total_time, receipt).
+            on_live_progress: Optional callback for real-time reel timer updates
+                (current_reel_number, current_reel_duration, total_time).
             use_content_detection: Use content-based session detection (for mirror mode).
+            manual_session_start: Start a session immediately on run().
         """
         self.capture = capture
         self.printer = printer
@@ -48,7 +53,9 @@ class Orchestrator:
         self.on_reel_change = on_reel_change
         self.on_session_start = on_session_start
         self.on_session_end = on_session_end
+        self.on_live_progress = on_live_progress
         self.use_content_detection = use_content_detection
+        self.manual_session_start = manual_session_start
 
         self.app_detector = AppDetector(
             android_package=config.instagram_package,
@@ -70,6 +77,8 @@ class Orchestrator:
         self._frame_count = 0
         self._last_app_state: AppState = AppState.NOT_RUNNING
         self._session_active = False  # True when user is in Reels mode
+        self._capture_failure_count = 0
+        self._max_capture_failures = 0
 
     def _on_reel_complete(self, session: ReelSession) -> None:
         """Handle completed reel viewing.
@@ -131,7 +140,13 @@ class Orchestrator:
         change_type = self.reel_detector.process_frame(frame)
 
         if change_type == ReelChangeType.NEW_REEL:
-            reel_count = self.time_tracker.get_reel_count() + 1
+            # Use current in-progress reel to compute the next reel index.
+            # `get_reel_count()` excludes the in-progress reel, which would
+            # otherwise produce duplicate numbering (1, 1, 2, ...) on first swipes.
+            if self.time_tracker.current_reel is not None:
+                reel_count = self.time_tracker.current_reel.reel_number + 1
+            else:
+                reel_count = self.time_tracker.get_reel_count() + 1
 
             # Start tracking new reel
             screenshot = self.reel_detector.last_screenshot
@@ -146,6 +161,13 @@ class Orchestrator:
             if screenshot:
                 self.time_tracker.update_screenshot(screenshot)
 
+        if self.on_live_progress and self.time_tracker.current_reel:
+            self.on_live_progress(
+                self.time_tracker.current_reel.reel_number,
+                self.time_tracker.get_current_duration(),
+                self.time_tracker.get_total_time(),
+            )
+
     def run(self) -> None:
         """Run the main processing loop."""
         self._setup_signal_handlers()
@@ -153,12 +175,16 @@ class Orchestrator:
         self._session_start = None
         self._session_active = False
         self._frame_count = 0
+        self._capture_failure_count = 0
 
         # Connect to device
-        print("Connecting to device...")
-        if not self.capture.connect():
-            print("Failed to connect to device")
-            return
+        if not self.capture.is_connected:
+            print("Connecting to device...")
+            if not self.capture.connect():
+                print("Failed to connect to device")
+                return
+        else:
+            print("Using existing connected device...")
 
         device_info = self.capture.device_info
         print(f"Connected to: {device_info.device_name}")
@@ -174,9 +200,14 @@ class Orchestrator:
 
         # Calculate frame interval
         frame_interval = 1.0 / self.config.capture_fps
+        # Treat a sustained run of failed captures as mirror disconnect.
+        self._max_capture_failures = max(6, int(self.config.capture_fps * 1.5))
 
         print(f"\nMonitoring at {self.config.capture_fps} FPS")
-        if use_content:
+        if self.manual_session_start:
+            print("Manual session mode enabled.")
+            print("Session started via UI. Detecting reel changes from mirror feed.")
+        elif use_content:
             print("Using content-based session detection (mirror mode)")
             print("Session will auto-start when Reels content is detected.")
         else:
@@ -185,12 +216,37 @@ class Orchestrator:
         print("Press Ctrl+C to stop\n")
 
         try:
-            if use_content:
+            if self.manual_session_start:
+                self._start_reels_session()
+                self._run_manual_session_loop(frame_interval)
+            elif use_content:
                 self._run_content_detection_loop(frame_interval)
             else:
                 self._run_app_detection_loop(frame_interval)
         finally:
             self._shutdown()
+
+    def _run_manual_session_loop(self, frame_interval: float) -> None:
+        """Run loop for manual booth sessions started from the UI."""
+        while self._running:
+            loop_start = time()
+
+            frame = self.capture.capture_screen()
+            if frame:
+                self._frame_count += 1
+                self._capture_failure_count = 0
+                if self._session_active:
+                    self._process_frame(frame)
+            else:
+                self._capture_failure_count += 1
+                if self._capture_failure_count >= self._max_capture_failures:
+                    self._handle_capture_disconnect()
+                    break
+
+            elapsed = time() - loop_start
+            sleep_time = frame_interval - elapsed
+            if sleep_time > 0:
+                sleep(sleep_time)
 
     def _run_app_detection_loop(self, frame_interval: float) -> None:
         """Run the main loop using app-based detection.
@@ -214,7 +270,13 @@ class Orchestrator:
                 frame = self.capture.capture_screen()
                 if frame:
                     self._frame_count += 1
+                    self._capture_failure_count = 0
                     self._process_frame(frame)
+                else:
+                    self._capture_failure_count += 1
+                    if self._capture_failure_count >= self._max_capture_failures:
+                        self._handle_capture_disconnect()
+                        break
 
             # Maintain frame rate
             elapsed = time() - loop_start
@@ -238,6 +300,7 @@ class Orchestrator:
             frame = self.capture.capture_screen()
             if frame:
                 self._frame_count += 1
+                self._capture_failure_count = 0
 
                 # Use content detector to determine session state
                 content_type, session_started, session_ended = (
@@ -253,6 +316,11 @@ class Orchestrator:
                 # Process frame for reel detection if in active session
                 if self._session_active and content_type == ContentType.REELS:
                     self._process_frame(frame)
+            else:
+                self._capture_failure_count += 1
+                if self._capture_failure_count >= self._max_capture_failures:
+                    self._handle_capture_disconnect()
+                    break
 
             # Maintain frame rate
             elapsed = time() - loop_start
@@ -283,6 +351,13 @@ class Orchestrator:
         print(f"\n{'=' * 40}")
         print("SESSION STARTED")
         print(f"{'=' * 40}")
+
+    def _handle_capture_disconnect(self) -> None:
+        """Handle sustained capture failures, usually mirror disconnect."""
+        print("\nMirror feed lost. Ending session.")
+        if self._session_active:
+            self._end_reels_session()
+        self._running = False
 
     def _end_reels_session(self) -> None:
         """End the current Reels viewing session."""

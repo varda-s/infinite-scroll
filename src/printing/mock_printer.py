@@ -86,13 +86,6 @@ class MockPrinter(BasePrinter):
         self._add_receipt_line("")
         self._add_receipt_line(f"  REEL #{reel_number}")
         self._add_receipt_line("-" * 42)
-
-        # Convert to ASCII and print
-        ascii_art = self._image_to_ascii(screenshot)
-        for line in ascii_art.strip().split("\n"):
-            self._add_receipt_line(f"  {line}")
-
-        self._add_receipt_line("-" * 42)
         duration_str = self.format_duration(duration_seconds)
         self._add_receipt_line(f"  Time spent: {duration_str}")
         self._add_receipt_line(f"  Screenshot: {screenshot_path.name}")

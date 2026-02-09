@@ -10,7 +10,7 @@ class Config:
     """Application configuration."""
 
     # Capture settings
-    capture_fps: int = 10
+    capture_fps: int = 20
     capture_timeout: float = 5.0  # Timeout for device operations
 
     # Detection settings
@@ -45,7 +45,7 @@ class Config:
         import os
 
         return cls(
-            capture_fps=int(os.getenv("CAPTURE_FPS", "10")),
+            capture_fps=int(os.getenv("CAPTURE_FPS", "20")),
             hash_threshold=int(os.getenv("HASH_THRESHOLD", "15")),
             min_reel_duration=float(os.getenv("MIN_REEL_DURATION", "0.5")),
             printer_type=os.getenv("PRINTER_TYPE", "mock"),  # type: ignore
