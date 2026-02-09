@@ -210,4 +210,7 @@ __marimo__/
 # Application data (auto-generated)
 data/
 output/
+*screentimecode
 .nicegui/
+*DS_Store
+

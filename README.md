@@ -35,6 +35,7 @@ Code path intentionally filters to ReelTracker-compatible mirror sources.
 - macOS (Apple Silicon or Intel)
 - Python `3.10+`
 - iPhone with Screen Mirroring / AirPlay capability
+- Xcode Command Line Tools
 - `uxplay` available either:
   - at `/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay`, or
   - on `PATH` as `uxplay`
@@ -50,24 +51,54 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Install / Build UxPlay
+## Install / Build UxPlay (Homebrew + Source Build)
 
-If `uxplay` is not already installed, build it once:
+### 1. Install macOS build tools
+
+```bash
+xcode-select --install
+```
+
+### 2. Install required Homebrew dependencies
+
+```bash
+brew update
+brew install cmake pkg-config openssl@3 libplist glib gobject-introspection gstreamer
+```
+
+### 3. Build UxPlay from source
 
 ```bash
 cd /Users/amanagarwal/Desktop/Stanford
 git clone https://github.com/antimof/UxPlay.git
 cd UxPlay
-cmake .
-make
+cmake -DCMAKE_BUILD_TYPE=Release .
+make -j"$(sysctl -n hw.ncpu)"
+```
+
+### 4. Install (optional)
+
+If you want `uxplay` globally available on `PATH`:
+
+```bash
 sudo make install
 ```
 
-Optional check:
+Note: this project already checks `/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay` first, so global install is optional.
+
+### 5. Verify UxPlay works
 
 ```bash
-uxplay -h
+/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay -h
 ```
+
+Manual smoke test:
+
+```bash
+/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay -n "ReelTracker" -fps 120 -pin 1234
+```
+
+You should see `ReelTracker` as an AirPlay target on iPhone.
 
 ## Run The App
 
@@ -167,6 +198,20 @@ pytest -q tests/integration/test_orchestrator.py::TestOrchestratorIntegration::t
 - Confirm the binary is at expected path or on `PATH`.
 - Check logs in `output/uxplay.stderr.log`.
 
+### `source .../gst-env` not found
+
+- This is expected for Homebrew `gstreamer` installs.
+- Do not use `gst-env` for this setup.
+- Use the Homebrew dependencies listed above and run `uxplay` directly.
+
+### `gst-plugin-scanner` / `libglib` / `gi.repository.Gst` warnings
+
+- Reinstall core GStreamer/GLib packages:
+
+```bash
+brew reinstall glib gobject-introspection gstreamer
+```
+
 ### ReelTracker not visible on iPhone
 
 - Ensure app is running.
@@ -199,4 +244,3 @@ pytest -q tests/integration/test_orchestrator.py::TestOrchestratorIntegration::t
 - `src/detection/reel_detector.py`: reel transition detection logic
 - `src/ui/services/replay_service.py`: replay generation
 - `src/ui/database/`: SQLModel schema/repositories
-
