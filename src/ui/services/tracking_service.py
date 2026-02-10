@@ -17,7 +17,6 @@ from src.detection.image_utils import compute_phash, extract_center_region
 from src.orchestrator import Orchestrator
 from src.printing.base import BasePrinter
 from src.printing.mock_printer import MockPrinter
-from src.printing.legacy_format import preprocess_reel_screenshot
 from src.tracking.time_tracker import ReelSession
 from src.ui.database.repository import ConfigRepository, SessionRepository
 from src.ui.services.device_service import device_service
@@ -200,10 +199,8 @@ class TrackingService:
     def _create_config(self) -> Config:
         """Create config from database settings."""
         configured_fps = ConfigRepository.get_typed("capture_fps")
-        if not isinstance(configured_fps, int):
-            configured_fps = 24
-        # Higher capture cadence improves detection reliability on normal-speed swipes.
-        configured_fps = max(24, configured_fps)
+        if not isinstance(configured_fps, int) or configured_fps < 15:
+            configured_fps = 20
 
         return Config(
             capture_fps=configured_fps,
@@ -247,12 +244,11 @@ class TrackingService:
             printer.set_line_callback(self._on_receipt_line)
             return printer
         else:
-            # Try real ESC/POS first, then fall back to mock if unavailable.
+            # For Rongta, use the mock for now - can add real ESC/POS later
             from src.printing.escpos_printer import ESCPOSPrinter
             try:
                 return ESCPOSPrinter()
-            except Exception as e:
-                print(f"[Printer] ESC/POS connect failed, falling back to mock printer: {e}")
+            except Exception:
                 # Fall back to mock if printer not available
                 printer = UIAwareMockPrinter(output_dir=output_dir, verbose=False)
                 printer.set_line_callback(self._on_receipt_line)
@@ -326,8 +322,7 @@ class TrackingService:
         if session.screenshot is not None and self._session_output_dir is not None:
             screenshot_file = self._session_output_dir / f"reel_{session.reel_number:04d}.png"
             try:
-                processed = preprocess_reel_screenshot(session.screenshot)
-                processed.save(screenshot_file)
+                session.screenshot.save(screenshot_file)
                 screenshot_path = str(screenshot_file.resolve())
             except Exception:
                 screenshot_path = None
