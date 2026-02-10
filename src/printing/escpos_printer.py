@@ -47,6 +47,7 @@ class ESCPOSPrinter(BasePrinter):
 
     # Common Rongta USB IDs to try
     RONGTA_USB_IDS = [
+        (0x0FE6, 0x811E),  # Legacy tested booth printer (known working)
         (0x0483, 0x5743),  # RP58
         (0x0483, 0x5740),  # RP80
         (0x0483, 0x5720),  # Generic
