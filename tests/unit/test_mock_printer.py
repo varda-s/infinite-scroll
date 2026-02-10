@@ -29,8 +29,7 @@ class TestMockPrinter:
         mock_printer.print_header("2024-01-01 12:00:00")
 
         content = mock_printer.get_receipt_content()
-        assert "INSTAGRAM REEL TRACKER" in content
-        assert "2024-01-01 12:00:00" in content
+        assert "[IMAGE] header_" in content
 
     def test_print_reel_saves_screenshot(
         self, mock_printer: MockPrinter, sample_image: Image.Image, temp_dir: Path
@@ -57,13 +56,13 @@ class TestMockPrinter:
         )
 
         content = mock_printer.get_receipt_content()
-        assert "5.5s" in content
-        assert "REEL #1" in content
+        assert "Started:" in content
+        assert "Time Spent: 5.50s" in content
 
-    def test_print_reel_includes_ascii_art(
+    def test_print_reel_includes_image_marker(
         self, mock_printer: MockPrinter, sample_image: Image.Image
     ) -> None:
-        """Test that print_reel includes ASCII art."""
+        """Test that print_reel includes screenshot marker in receipt text."""
         mock_printer.print_reel(
             screenshot=sample_image,
             duration_seconds=5.0,
@@ -71,34 +70,30 @@ class TestMockPrinter:
         )
 
         content = mock_printer.get_receipt_content()
-        # ASCII art should have multiple lines with various characters
-        lines = content.split("\n")
-        ascii_lines = [l for l in lines if "@" in l or "#" in l or "*" in l]
-        assert len(ascii_lines) > 0
+        assert "[IMAGE] reel_" in content
 
     def test_print_summary(self, mock_printer: MockPrinter) -> None:
         """Test printing summary."""
         mock_printer.print_summary(total_reels=5, total_time_seconds=125.5)
 
         content = mock_printer.get_receipt_content()
-        assert "SESSION COMPLETE" in content
-        assert "5" in content  # total reels
-        assert "2m" in content  # ~2 minutes
+        assert "REEL RECEIPT" in content
+        assert "TOTAL" in content
+        assert "$125.50" in content
 
     def test_print_summary_with_average(self, mock_printer: MockPrinter) -> None:
         """Test that summary includes average time."""
         mock_printer.print_summary(total_reels=4, total_time_seconds=40.0)
 
         content = mock_printer.get_receipt_content()
-        assert "Avg time per reel" in content
+        assert "Average attention span" in content
 
-    def test_print_summary_includes_thank_you(self, mock_printer: MockPrinter) -> None:
-        """Test that summary includes thank you message."""
+    def test_print_summary_includes_peak_fixation(self, mock_printer: MockPrinter) -> None:
+        """Test that summary includes peak fixation line."""
         mock_printer.print_summary(total_reels=3, total_time_seconds=60.0)
 
         content = mock_printer.get_receipt_content()
-        assert "THANK YOU FOR SCROLLING" in content
-        assert "Maybe go outside" in content
+        assert "Peak fixation" in content
 
     def test_full_session_output(
         self, mock_printer: MockPrinter, sample_image: Image.Image
@@ -114,15 +109,15 @@ class TestMockPrinter:
         content = mock_printer.get_receipt_content()
 
         # Verify session structure
-        assert "INSTAGRAM REEL TRACKER" in content  # Header
-        assert "2024-01-15 14:30:00" in content
-        assert "REEL #1" in content  # Reel 1
-        assert "10.5s" in content
-        assert "REEL #2" in content  # Reel 2
-        assert "5.2s" in content
-        assert "SESSION COMPLETE" in content  # Summary
-        assert "Total reels viewed: 2" in content
-        assert "THANK YOU FOR SCROLLING" in content
+        assert "[IMAGE] header_" in content
+        assert "Started:" in content
+        assert "Time Spent: 10.50s" in content
+        assert "Time Spent: 5.20s" in content
+        assert "REEL RECEIPT" in content
+        assert "Reel 1 [" in content
+        assert "Reel 2 [" in content
+        assert "TOTAL" in content
+        assert "Peak fixation" in content
         assert "✂" in content  # Cut
 
     def test_cut(self, mock_printer: MockPrinter) -> None:
@@ -142,7 +137,7 @@ class TestMockPrinter:
 
         with open(receipts[0]) as f:
             content = f.read()
-            assert "INSTAGRAM REEL TRACKER" in content
+            assert "header_" in content
 
     def test_context_manager(self, temp_dir: Path) -> None:
         """Test using printer as context manager."""

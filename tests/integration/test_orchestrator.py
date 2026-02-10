@@ -204,7 +204,7 @@ class TestOrchestratorIntegration:
 
         # Check receipt content - should have header when session started
         content = printer.get_receipt_content()
-        assert "INSTAGRAM REEL TRACKER" in content
+        assert "[IMAGE] header_" in content
 
     def test_session_ends_with_summary_and_thank_you(
         self, temp_dir: Path, varying_images_dir: Path
@@ -233,8 +233,8 @@ class TestOrchestratorIntegration:
 
         # Check receipt includes session complete and thank you
         content = printer.get_receipt_content()
-        assert "SESSION COMPLETE" in content
-        assert "THANK YOU FOR SCROLLING" in content
+        assert "REEL RECEIPT" in content
+        assert "TOTAL" in content
 
     def test_receipt_includes_all_session_elements(
         self, temp_dir: Path, varying_images_dir: Path
@@ -265,13 +265,13 @@ class TestOrchestratorIntegration:
         content = printer.get_receipt_content()
 
         # Verify complete session structure
-        assert "INSTAGRAM REEL TRACKER" in content  # Header
-        assert "Session started:" in content
-        assert "REEL #" in content  # At least one reel
-        assert "Time spent:" in content  # Duration tracked
-        assert "SESSION COMPLETE" in content  # Summary
-        assert "Total reels viewed:" in content
-        assert "THANK YOU FOR SCROLLING" in content  # Thank you message
+        assert "[IMAGE] header_" in content
+        assert "Started:" in content
+        assert "Time Spent:" in content
+        assert "REEL RECEIPT" in content
+        assert "Reel 1 [" in content
+        assert "TOTAL" in content
+        assert "Peak fixation" in content
 
     def test_manual_session_tracks_reel_changes_in_mirror_mode(
         self, temp_dir: Path
@@ -309,8 +309,8 @@ class TestOrchestratorIntegration:
         thread.join(timeout=5)
 
         content = printer.get_receipt_content()
-        assert "INSTAGRAM REEL TRACKER" in content
-        assert "REEL #" in content
+        assert "[IMAGE] header_" in content
+        assert "Time Spent:" in content
 
     def test_session_ends_when_mirror_disconnects(self, temp_dir: Path) -> None:
         """Test active session ends automatically if mirror stream disconnects."""
@@ -371,7 +371,7 @@ class TestOrchestratorIntegration:
 
         assert not thread.is_alive()
         content = printer.get_receipt_content()
-        assert "SESSION COMPLETE" in content
+        assert "REEL RECEIPT" in content
 
     def test_reel_number_advances_from_current_reel_not_completed_count(
         self, temp_dir: Path, varying_images_dir: Path

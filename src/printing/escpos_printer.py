@@ -1,11 +1,25 @@
 """ESC/POS thermal receipt printer implementation."""
 
+import time
 from datetime import datetime
 from enum import Enum
 
 from PIL import Image
 
 from src.printing.base import BasePrinter
+from src.printing.gemini_categorizer import GeminiCategorizer
+from src.printing.legacy_format import (
+    LINE_WIDTH,
+    PRINT_WIDTH_MM,
+    PRINTER_DPI,
+    ReelReceiptEntry,
+    SIDE_MARGIN_MM,
+    build_summary_lines,
+    load_legacy_image,
+    mm_to_px,
+    play_legacy_audio,
+    preprocess_reel_screenshot,
+)
 
 
 class PrinterModel(Enum):
@@ -45,7 +59,7 @@ class ESCPOSPrinter(BasePrinter):
     def __init__(
         self,
         device_path: str | None = None,
-        printer_width: int = 384,
+        printer_width: int = mm_to_px(PRINT_WIDTH_MM, PRINTER_DPI),
         vendor_id: int | None = None,
         product_id: int | None = None,
         model: PrinterModel | None = None,
@@ -67,6 +81,8 @@ class ESCPOSPrinter(BasePrinter):
         self.product_id = product_id
         self.auto_detect = auto_detect
         self._printer = None
+        self._reel_entries: dict[int, ReelReceiptEntry] = {}
+        self._categorizer = GeminiCategorizer(max_workers=4)
 
         # Apply model preset if given
         if model:
@@ -139,94 +155,130 @@ class ESCPOSPrinter(BasePrinter):
 
         return printers
 
-    def _prepare_image(self, image: Image.Image) -> Image.Image:
-        """Prepare image for thermal printing.
+    def _prepare_image(self, image: Image.Image, side_margin_mm: float = 0.0) -> Image.Image:
+        """Prepare image for thermal printing with optional side margins."""
+        paper_width_px = int(self.printer_width)
+        side_margin_px = mm_to_px(side_margin_mm, PRINTER_DPI) if side_margin_mm > 0 else 0
+        inner_width_px = max(1, paper_width_px - (2 * side_margin_px))
 
-        Args:
-            image: Original image.
+        w_percent = inner_width_px / float(image.size[0])
+        height_px = max(1, int(float(image.size[1]) * w_percent))
+        resized = image.resize((inner_width_px, height_px), Image.Resampling.LANCZOS).convert("1")
+        if side_margin_px <= 0:
+            return resized
 
-        Returns:
-            Resized and converted image.
-        """
-        # Calculate new height maintaining aspect ratio
-        aspect_ratio = image.height / image.width
-        new_height = int(self.printer_width * aspect_ratio)
+        canvas = Image.new("1", (paper_width_px, height_px), 1)
+        x = (paper_width_px - resized.width) // 2
+        canvas.paste(resized, (x, 0))
+        return canvas
 
-        # Resize image
-        image = image.resize((self.printer_width, new_height), Image.Resampling.LANCZOS)
+    def _print_legacy_asset(self, asset_name: str) -> None:
+        if not self._printer:
+            return
+        asset_img = load_legacy_image(asset_name)
+        if asset_img is None:
+            return
+        self._printer.image(self._prepare_image(asset_img))
 
-        # Convert to mode suitable for thermal printing
-        image = image.convert("1")  # 1-bit pixels (black and white)
-
-        return image
+    def _safe_feed(self, lines: int) -> None:
+        if not self._printer:
+            return
+        try:
+            self._printer.print_and_feed(lines)
+        except Exception:
+            try:
+                self._printer.feed(lines)
+            except Exception:
+                pass
 
     def print_header(self, session_start: str) -> None:
-        """Print session header."""
         if not self._printer:
             return
 
-        self._printer.set(align="center", bold=True, double_height=True)
-        self._printer.text("INSTAGRAM REEL TRACKER\n")
-        self._printer.set(align="center", bold=False, double_height=False)
-        self._printer.text("=" * 32 + "\n")
-        self._printer.text(f"Session: {session_start}\n")
-        self._printer.text("-" * 32 + "\n\n")
+        self._print_legacy_asset("header.png")
 
     def print_reel(self, screenshot: Image.Image, duration_seconds: float, reel_number: int) -> None:
-        """Print a reel receipt with screenshot and duration."""
         if not self._printer:
             return
 
-        # Reel header
-        self._printer.set(align="center", bold=True)
-        self._printer.text(f"REEL #{reel_number}\n")
-        self._printer.set(bold=False)
-        self._printer.text("-" * 32 + "\n")
+        processed = preprocess_reel_screenshot(screenshot)
+        self._categorizer.submit(reel_number=reel_number, screenshot=processed)
+        topic = "Processing..."
+        self._reel_entries[reel_number] = ReelReceiptEntry(
+            reel_number=reel_number,
+            duration_seconds=duration_seconds,
+            topic=topic,
+        )
 
-        # Print screenshot
-        prepared_image = self._prepare_image(screenshot)
-        self._printer.image(prepared_image)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._printer.set(align="center", bold=False, width=1, height=1)
+        self._printer.text(f"Started: {ts}\n")
 
-        # Print duration
-        self._printer.text("\n")
-        self._printer.text("-" * 32 + "\n")
-        duration_str = self.format_duration(duration_seconds)
-        self._printer.set(align="center", bold=True)
-        self._printer.text(f"Time spent: {duration_str}\n")
-        self._printer.set(bold=False)
-        self._printer.text("-" * 32 + "\n\n")
+        self._printer.image(self._prepare_image(processed, side_margin_mm=SIDE_MARGIN_MM))
+
+        self._printer.set(align="center", bold=True, width=1, height=1)
+        self._printer.text(f"Time Spent: {duration_seconds:.2f}s\n")
+        self._printer.set(align="left", bold=False, width=1, height=1)
 
     def print_summary(self, total_reels: int, total_time_seconds: float) -> None:
-        """Print session summary."""
         if not self._printer:
             return
 
-        self._printer.text("\n")
-        self._printer.set(align="center", bold=True, double_height=True)
-        self._printer.text("SESSION COMPLETE\n")
-        self._printer.set(bold=False, double_height=False)
-        self._printer.text("=" * 32 + "\n")
+        # Must wait for all Gemini calls before final receipt is printed.
+        topics = self._categorizer.wait_for_all()
+        for reel_number, topic in topics.items():
+            if reel_number in self._reel_entries and topic:
+                self._reel_entries[reel_number].topic = topic
 
-        self._printer.set(align="left")
-        self._printer.text(f"Total reels: {total_reels}\n")
-        self._printer.text(f"Total time: {self.format_duration(total_time_seconds)}\n")
+        self._print_legacy_asset("art.png")
+        self._print_legacy_asset("summary.png")
 
-        if total_reels > 0:
-            avg_time = total_time_seconds / total_reels
-            self._printer.text(f"Avg per reel: {self.format_duration(avg_time)}\n")
+        entries = list(self._reel_entries.values())
+        if not entries and total_reels > 0:
+            avg_duration = total_time_seconds / total_reels
+            entries = [
+                ReelReceiptEntry(
+                    reel_number=i + 1,
+                    duration_seconds=avg_duration,
+                    topic="Unlabeled",
+                )
+                for i in range(total_reels)
+            ]
 
-        self._printer.text("=" * 32 + "\n\n")
+        lines = build_summary_lines(entries, line_width=LINE_WIDTH)
+        fed_after_totals = False
 
-        # Thank you message
-        self._printer.set(align="center", bold=True)
-        self._printer.text("THANK YOU FOR SCROLLING!\n\n")
-        self._printer.set(bold=False)
-        self._printer.text("Maybe go outside for a bit? :)\n")
-        self._printer.text("-" * 32 + "\n")
+        for idx, line in enumerate(lines):
+            if idx == 0 and line == "REEL RECEIPT":
+                self._printer.set(align="center", bold=True, double_width=True, double_height=True)
+                self._printer.text(f"{line}\n")
+                self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+                continue
 
-        # Print timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._printer.text(f"\n{timestamp}\n\n")
+            if line == "NO REELS RECORDED":
+                self._printer.set(align="center", bold=True, double_width=True, double_height=True)
+                self._printer.text(f"{line}\n")
+                self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+                continue
+
+            if line.startswith("TOTAL"):
+                self._printer.set(align="left", bold=True, double_width=False, double_height=False)
+                self._printer.text(f"{line}\n")
+                self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+                continue
+
+            if not fed_after_totals and line.startswith("You spent"):
+                self._safe_feed(1)
+                fed_after_totals = True
+
+            self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+            self._printer.text(f"{line}\n")
+
+        self._print_legacy_asset("footer.png")
+        self._safe_feed(6)
+        time.sleep(1.0)
+        play_legacy_audio("waitaudio.wav", blocking=False)
+        self._printer.set(align="left", bold=False, double_width=False, double_height=False)
 
     def cut(self) -> None:
         """Cut the receipt paper."""
@@ -237,6 +289,7 @@ class ESCPOSPrinter(BasePrinter):
 
     def close(self) -> None:
         """Close the printer connection."""
+        self._categorizer.close()
         if self._printer:
             try:
                 self._printer.close()
