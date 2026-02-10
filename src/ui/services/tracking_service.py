@@ -247,11 +247,12 @@ class TrackingService:
             printer.set_line_callback(self._on_receipt_line)
             return printer
         else:
-            # For Rongta, use the mock for now - can add real ESC/POS later
+            # Try real ESC/POS first, then fall back to mock if unavailable.
             from src.printing.escpos_printer import ESCPOSPrinter
             try:
                 return ESCPOSPrinter()
-            except Exception:
+            except Exception as e:
+                print(f"[Printer] ESC/POS connect failed, falling back to mock printer: {e}")
                 # Fall back to mock if printer not available
                 printer = UIAwareMockPrinter(output_dir=output_dir, verbose=False)
                 printer.set_line_callback(self._on_receipt_line)

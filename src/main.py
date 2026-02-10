@@ -36,6 +36,8 @@ Examples:
 
   # CLI: Use Rongta with specific USB IDs
   python -m src.main --cli --printer escpos --vendor-id 0x0483 --product-id 0x5743
+  # CLI: Use legacy tested booth IDs
+  python -m src.main --cli --printer escpos --vendor-id 0x0fe6 --product-id 0x811e
 
   # Find your printer's USB IDs
   python -m src.main --list-printers
@@ -173,6 +175,7 @@ def list_printers() -> None:
     """List USB printers and their IDs."""
     print("Searching for USB printers...\n")
     print("Known Rongta USB IDs:")
+    print("  Legacy Booth:   VID=0x0FE6, PID=0x811E")
     print("  RP58 (58mm):  VID=0x0483, PID=0x5743")
     print("  RP80 (80mm):  VID=0x0483, PID=0x5740")
     print("  ACE V1:       VID=0x6868, PID=0x0500")
@@ -191,7 +194,7 @@ def list_printers() -> None:
 
         # Filter for likely printers
         printer_classes = {7}  # Printer class
-        rongta_vendors = {0x0483, 0x6868, 0x0416}
+        rongta_vendors = {0x0FE6, 0x0483, 0x6868, 0x0416}
 
         print("Potential printers found:\n")
         found_any = False

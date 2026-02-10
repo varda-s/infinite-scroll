@@ -14,11 +14,20 @@ def check_rongta_connected() -> bool:
     try:
         import usb.core
 
-        # Known Rongta vendor IDs
-        rongta_vendors = [0x0483, 0x6868, 0x0416]
+        # Known tested/compatible ESC-POS USB ID pairs.
+        known_usb_ids = [
+            (0x0FE6, 0x811E),  # Legacy tested booth printer
+            (0x0483, 0x5743),  # RP58
+            (0x0483, 0x5740),  # RP80
+            (0x0483, 0x5720),  # Generic
+            (0x6868, 0x0500),  # ACE V1
+            (0x6868, 0x0200),  # Alternative
+            (0x0416, 0x5011),  # Some Rongta models
+            (0x0483, 0x070B),  # RP328
+        ]
 
-        for vendor_id in rongta_vendors:
-            device = usb.core.find(idVendor=vendor_id)
+        for vendor_id, product_id in known_usb_ids:
+            device = usb.core.find(idVendor=vendor_id, idProduct=product_id)
             if device is not None:
                 return True
         return False
@@ -73,12 +82,19 @@ def create_printer_panel(
                     ui.tooltip("Connect printer via USB first")
 
         def on_mock_change(e):
+            if app_state.session_active:
+                mock_radio.value = "mock" if app_state.printer_type == "mock" else None
+                return
             if e.args:
                 app_state.set_printer_type("mock")
                 if rongta_available:
                     rongta_radio.value = None
 
         def on_rongta_change(e):
+            if app_state.session_active:
+                if rongta_available:
+                    rongta_radio.value = "rongta" if app_state.printer_type == "rongta" else None
+                return
             if e.args and rongta_available:
                 app_state.set_printer_type("rongta")
                 mock_radio.value = None
@@ -115,6 +131,9 @@ def create_printer_panel(
             if app_state.session_active:
                 start_btn.set_visibility(False)
                 stop_btn.set_visibility(True)
+                mock_radio.disable()
+                if rongta_available:
+                    rongta_radio.disable()
             else:
                 stop_btn.set_visibility(False)
                 start_btn.set_visibility(True)
@@ -122,6 +141,9 @@ def create_printer_panel(
                 # tracking service wait for/attach to the ReelTracker mirror.
                 start_btn.enable()
                 start_btn.props("color=positive" if has_device else "color=primary")
+                mock_radio.enable()
+                if rongta_available:
+                    rongta_radio.enable()
 
         update_buttons()
         ui.timer(0.1, update_buttons)
