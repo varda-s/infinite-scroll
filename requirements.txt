@@ -1,0 +1,22 @@
+# Core dependencies
+opencv-python>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+imagehash>=4.3.0
+
+# Device connectivity
+pymobiledevice3>=2.0.0
+adb-shell>=0.4.0
+
+# macOS window detection (for uxplay/GStreamer support)
+pyobjc-framework-Quartz>=9.0.0
+
+# Printing
+python-escpos>=3.1
+google-genai>=1.30.0
+
+# Web UI
+nicegui>=2.0.0
+
+# Database
+sqlmodel>=0.0.22
