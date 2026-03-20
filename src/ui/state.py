@@ -37,7 +37,7 @@ class AppState:
     device_polling: bool = True
 
     # Printer state
-    printer_type: str = "mock"  # "mock" or "rongta"
+    printer_type: str = "rongta"  # "mock" or "rongta"
     printer_connected: bool = False
 
     # Session state

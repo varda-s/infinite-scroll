@@ -106,8 +106,8 @@ def create_printer_panel(
 
             selected_printer = app_state.printer_type
             if selected_printer not in printer_options:
-                selected_printer = "mock"
-                app_state.set_printer_type("mock")
+                selected_printer = "rongta"
+                app_state.set_printer_type("rongta")
 
             printer_radio = ui.radio(
                 options=printer_options,
