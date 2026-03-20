@@ -1,6 +1,7 @@
 """Main NiceGUI application entry point."""
 
 import asyncio
+from pathlib import Path
 
 from nicegui import app, ui
 
@@ -14,6 +15,7 @@ from src.ui.components.admin_config import create_admin_page
 from src.ui.components.auth import create_login_page, create_signup_page, require_auth, get_current_user
 from src.ui.components.sidebar import create_sidebar, create_header_with_menu
 from src.ui.components.history_page import create_history_page
+from src.ui.components.session_page import create_session_page
 from src.ui.services.device_service import device_service
 from src.ui.services.media_paths import OUTPUT_ROOT
 from src.ui.services.tracking_service import tracking_service
@@ -207,6 +209,9 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     # Serve output media (screenshots/replays) as browser-accessible static files.
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     app.add_static_files("/output", str(OUTPUT_ROOT))
+    ui_assets_root = Path(__file__).resolve().parent / "assets"
+    ui_assets_root.mkdir(parents=True, exist_ok=True)
+    app.add_static_files("/assets", str(ui_assets_root))
 
     # Register startup/shutdown handlers
     app.on_startup(startup)
@@ -215,17 +220,10 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     # Main dashboard (no auth for booth mode)
     @ui.page("/")
     def index():
-        create_dashboard()
-
-    # Session history page
-    @ui.page("/history")
-    def history():
-        create_history_page()
-
-    # Admin page
-    @ui.page("/admin")
-    def admin():
-        create_admin_page()
+        create_session_page(
+            on_start_session=on_start_session,
+            on_stop_session=on_stop_session,
+        )
 
     # Run the app
     ui.run(
