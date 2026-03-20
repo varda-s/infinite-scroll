@@ -77,26 +77,14 @@ def create_printer_panel(
 
         # Check if Rongta is connected
         rongta_available = check_rongta_connected()
-        app_state.set_printer_connected(rongta_available)
 
         with ui.row().classes("items-center gap-2 mb-1"):
             printer_status_icon = ui.icon("circle")
             printer_status_label = ui.label("")
 
-            def update_printer_status() -> None:
-                connected = check_rongta_connected()
-                app_state.set_printer_connected(connected)
-                if connected:
-                    printer_status_icon.props("color=positive")
-                    printer_status_label.text = "Rongta: Connected"
-                    printer_status_label.classes(remove="text-red-600", add="text-green-700")
-                else:
-                    printer_status_icon.props("color=negative")
-                    printer_status_label.text = "Rongta: Not detected"
-                    printer_status_label.classes(remove="text-green-700", add="text-red-600")
-
-            update_printer_status()
-            ui.timer(1.0, update_printer_status)
+        with ui.row().classes("items-center gap-2 text-gray-400 text-sm") as rongta_warning_row:
+            ui.icon("usb_off").classes("text-gray-400")
+            ui.label("Rongta USB not detected. Start will fail if printer is unavailable.")
 
         # Printer type selection (single radio group for mutual exclusivity)
         with ui.column().classes("w-full gap-2"):
@@ -116,10 +104,30 @@ def create_printer_panel(
                 value=selected_printer,
             ).classes("w-full")
 
-            if not rongta_available:
-                with ui.row().classes("items-center gap-2 text-gray-400 text-sm"):
-                    ui.icon("usb_off").classes("text-gray-400")
-                    ui.label("Rongta USB not detected. Start will fail if printer is unavailable.")
+        def update_printer_status() -> None:
+            connected = check_rongta_connected()
+            selected = printer_radio.value if printer_radio.value in {"mock", "rongta"} else app_state.printer_type
+
+            if selected == "mock":
+                # Mock mode does not require hardware availability.
+                app_state.set_printer_connected(True)
+                printer_status_icon.props("color=info")
+                printer_status_label.text = "Mock printer selected"
+                printer_status_label.classes(remove="text-red-600 text-green-700", add="text-blue-700")
+                rongta_warning_row.set_visibility(False)
+                return
+
+            app_state.set_printer_connected(connected)
+            if connected:
+                printer_status_icon.props("color=positive")
+                printer_status_label.text = "Rongta: Connected"
+                printer_status_label.classes(remove="text-red-600 text-blue-700", add="text-green-700")
+                rongta_warning_row.set_visibility(False)
+            else:
+                printer_status_icon.props("color=negative")
+                printer_status_label.text = "Rongta: Not detected"
+                printer_status_label.classes(remove="text-green-700 text-blue-700", add="text-red-600")
+                rongta_warning_row.set_visibility(True)
 
         def on_printer_change(e):
             if app_state.session_active:
@@ -140,14 +148,18 @@ def create_printer_panel(
 
             if selected in {"mock", "rongta"}:
                 app_state.set_printer_type(selected)
+                update_printer_status()
 
         printer_radio.on("update:model-value", on_printer_change)
+        update_printer_status()
+        ui.timer(1.0, update_printer_status)
 
         def on_start_click() -> None:
             # Force-sync selected UI value before starting session.
             selected = printer_radio.value
             if selected in {"mock", "rongta"}:
                 app_state.set_printer_type(selected)
+                update_printer_status()
             on_start_session()
 
         ui.separator().classes("my-3")
