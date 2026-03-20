@@ -51,22 +51,12 @@ def create_dashboard() -> None:
                     ui.label("Dashboard").classes("text-gray-200")
 
             # Session History link
-            with ui.link(target="/history").classes("w-full no-underline"):
+            with ui.link(target="/admin/history").classes("w-full no-underline"):
                 with ui.row().classes(
                     "w-full items-center gap-3 p-3 rounded hover:bg-gray-700 cursor-pointer"
                 ):
                     ui.icon("history").classes("text-xl text-gray-300")
                     ui.label("Session History").classes("text-gray-200")
-
-            ui.separator().classes("bg-gray-700 my-2")
-
-            # Admin link
-            with ui.link(target="/admin").classes("w-full no-underline"):
-                with ui.row().classes(
-                    "w-full items-center gap-3 p-3 rounded hover:bg-gray-700 cursor-pointer"
-                ):
-                    ui.icon("settings").classes("text-xl text-gray-300")
-                    ui.label("Settings").classes("text-gray-200")
 
     # Header with hamburger menu
     with ui.header().classes("bg-gradient-to-r from-purple-600 to-pink-500"):
@@ -233,6 +223,11 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     @ui.page("/admin")
     def admin():
         create_dashboard()
+
+    # Session history page
+    @ui.page("/admin/history")
+    def history():
+        create_history_page()
 
     # Run the app
     ui.run(

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from sqlalchemy import event
 from sqlmodel import Session as SQLSession
 from sqlmodel import SQLModel, create_engine
 
@@ -25,6 +26,15 @@ def get_engine():
             echo=False,
             connect_args={"check_same_thread": False},
         )
+
+        @event.listens_for(_engine, "connect")
+        def configure_sqlite(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
     return _engine
 
 

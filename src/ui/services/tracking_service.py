@@ -3,6 +3,7 @@
 import asyncio
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -57,6 +58,7 @@ class TrackingService:
         self._stop_in_progress = False
         self._accept_callbacks = False
         self._db_session_id: Optional[int] = None
+        self._persist_session_data = True
         self._session_output_dir: Optional[Path] = None
         self._last_reel_hash: Optional[str] = None
         self._last_reel_at: float = 0.0
@@ -123,19 +125,27 @@ class TrackingService:
         # Create config from database settings
         config = self._create_config()
 
-        # Create database session
-        db_session = SessionRepository.create_session(
-            device_type=device.device_type.name.lower(),
-            device_name=device.device_name,
-            printer_type=app_state.printer_type,
-            user_id=user_id,
-        )
-        self._db_session_id = db_session.id
-        self._session_output_dir = OUTPUT_ROOT / "sessions" / f"session_{db_session.id}"
+        self._persist_session_data = True
+        self._db_session_id = None
+        session_dir_name = f"session_offline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        try:
+            db_session = SessionRepository.create_session(
+                device_type=device.device_type.name.lower(),
+                device_name=device.device_name,
+                printer_type=app_state.printer_type,
+                user_id=user_id,
+            )
+            self._db_session_id = db_session.id
+            session_dir_name = f"session_{db_session.id}"
+        except Exception as e:
+            self._persist_session_data = False
+            print(f"Database session create failed; continuing without persistence: {e}")
+
+        self._session_output_dir = OUTPUT_ROOT / "sessions" / session_dir_name
         self._session_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Update app state
-        app_state.start_session(db_session.id)
+        app_state.start_session(self._db_session_id or 0)
         self._last_reel_hash = None
         self._last_reel_at = 0.0
 
@@ -212,17 +222,25 @@ class TrackingService:
 
     def _create_config(self) -> Config:
         """Create config from database settings."""
-        configured_fps = ConfigRepository.get_typed("capture_fps")
+        def get_setting(key: str, default):
+            try:
+                value = ConfigRepository.get_typed(key)
+            except Exception as e:
+                print(f"Config read failed for {key}; using default {default}: {e}")
+                return default
+            return default if value is None else value
+
+        configured_fps = get_setting("capture_fps", 20)
         if not isinstance(configured_fps, int) or configured_fps < 15:
             configured_fps = 20
 
         return Config(
             capture_fps=configured_fps,
-            capture_timeout=ConfigRepository.get_typed("capture_timeout") or 5.0,
-            hash_threshold=ConfigRepository.get_typed("hash_threshold") or 15,
-            min_reel_duration=ConfigRepository.get_typed("min_reel_duration") or 0.5,
-            printer_width=ConfigRepository.get_typed("printer_width") or 384,
-            save_screenshots=ConfigRepository.get_typed("save_screenshots") or True,
+            capture_timeout=get_setting("capture_timeout", 5.0),
+            hash_threshold=get_setting("hash_threshold", 15),
+            min_reel_duration=get_setting("min_reel_duration", 0.5),
+            printer_width=get_setting("printer_width", 384),
+            save_screenshots=get_setting("save_screenshots", True),
         )
 
     def _create_capture(self, device: DeviceInfo) -> Optional[BaseCapture]:
@@ -363,13 +381,17 @@ class TrackingService:
         app_state.on_reel_completed(reel_update)
 
         # Save to database
-        if self._db_session_id:
-            SessionRepository.add_receipt(
-                session_id=self._db_session_id,
-                reel_number=session.reel_number,
-                duration_seconds=session.duration,
-                screenshot_path=screenshot_path,
-            )
+        if self._db_session_id and self._persist_session_data:
+            try:
+                SessionRepository.add_receipt(
+                    session_id=self._db_session_id,
+                    reel_number=session.reel_number,
+                    duration_seconds=session.duration,
+                    screenshot_path=screenshot_path,
+                )
+            except Exception as e:
+                self._persist_session_data = False
+                print(f"Receipt persistence failed; continuing session without database writes: {e}")
 
     def _on_session_start(self) -> None:
         """Handle session start event."""
@@ -378,16 +400,20 @@ class TrackingService:
     def _on_session_end(self, total_reels: int, total_time: float, receipt: str) -> None:
         """Handle session end event."""
         # Update database
-        if self._db_session_id:
-            SessionRepository.complete_session(
-                session_id=self._db_session_id,
-                total_reels=total_reels,
-                total_time_seconds=total_time,
-                receipt_content=receipt,
-            )
-            ensure_session_replay_video(self._db_session_id)
+        if self._db_session_id and self._persist_session_data:
+            try:
+                SessionRepository.complete_session(
+                    session_id=self._db_session_id,
+                    total_reels=total_reels,
+                    total_time_seconds=total_time,
+                    receipt_content=receipt,
+                )
+                ensure_session_replay_video(self._db_session_id)
+            except Exception as e:
+                print(f"Session completion persistence failed; tracking completed anyway: {e}")
 
         self._db_session_id = None
+        self._persist_session_data = True
         self._session_output_dir = None
         self._accept_callbacks = False
         device_service.prime_next_user_pairing()

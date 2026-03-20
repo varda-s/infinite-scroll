@@ -39,25 +39,12 @@ def create_sidebar() -> ui.left_drawer:
                     ui.label("Dashboard").classes("text-gray-200")
 
             # Session History
-            with ui.link(target="/history").classes("w-full no-underline"):
+            with ui.link(target="/admin/history").classes("w-full no-underline"):
                 with ui.row().classes(
                     "w-full items-center gap-3 p-3 rounded hover:bg-gray-700 cursor-pointer"
                 ):
                     ui.icon("history").classes("text-xl text-gray-300")
                     ui.label("Session History").classes("text-gray-200")
-
-            ui.separator().classes("bg-gray-700 my-2")
-
-            # Admin (only for admins)
-            if user.get("is_admin"):
-                with ui.link(target="/admin").classes("w-full no-underline"):
-                    with ui.row().classes(
-                        "w-full items-center gap-3 p-3 rounded hover:bg-gray-700 cursor-pointer"
-                    ):
-                        ui.icon("admin_panel_settings").classes("text-xl text-orange-400")
-                        ui.label("Admin Settings").classes("text-gray-200")
-
-                ui.separator().classes("bg-gray-700 my-2")
 
         # Spacer
         ui.element("div").classes("flex-grow")

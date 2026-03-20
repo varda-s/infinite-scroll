@@ -15,8 +15,8 @@ def create_session_page(
     on_stop_session: Callable[[], None],
 ) -> None:
     """Render the simplified one-page session UI."""
-    hero_image_file = Path(__file__).resolve().parent.parent / "assets" / "images" / "mark-your-time.png"
-    hero_image_url = "/assets/images/mark-your-time.png"
+    hero_image_file = Path(__file__).resolve().parent.parent / "assets" / "images" / "thank-you-for-your-time.png"
+    hero_image_url = "/assets/images/thank-you-for-your-time.png"
     page_bg = _get_image_corner_bg(hero_image_file)
 
     style_template = """
@@ -82,7 +82,7 @@ def create_session_page(
                 if hero_image_file.exists():
                     ui.image(hero_image_url).classes("hero-image")
                 else:
-                    ui.label("Hero image missing: add /src/ui/assets/images/mark-your-time.png").classes(
+                    ui.label("Hero image missing: add /src/ui/assets/images/thank-you-for-your-time.png").classes(
                         "text-red-700 font-semibold"
                     )
 

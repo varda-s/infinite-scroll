@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import random
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -19,24 +20,76 @@ MODEL_PREFERENCE = [
     "models/gemini-2.0-flash",
 ]
 
+REEL_LABEL_POOL = [
+    "watching water evaporate",
+    "not touching grass",
+    "working hard at the data factory",
+    "on a break after sending one email",
+    "numbing my inner voice",
+    "earned this break (not really)",
+    "just one more (x27)",
+    "soft spiraling",
+    "avoiding one specific thought",
+    "anxiety feedback loop",
+    "microdosing dopamine",
+    "feeling something but not naming it",
+    "outsourced self-knowledge",
+    "outside? never heard of her",
+    "lost to the void",
+    "time debt accumulating",
+    "pre-bedtime mistake",
+    "between tasks (forever)",
+    "time traveling (forward only)",
+    "this wasn't the plan",
+    "buffering real life",
+    "research (it's not research)",
+    "warming up to begin task",
+    "thumb endurance training",
+    "drinking zero water",
+    "sitting still in the same position",
+    "chronically online",
+    "training the algorithm for free",
+    "engagement farming (as the crop)",
+    "aspirational living (from bed)",
+    "self delusion",
+    "staring at nothing (HD)",
+    "rotating the same 5 thoughts",
+    "existence intermission",
+    "primary coping mechanism",
+    "free therapy?",
+    "visual caffeine",
+    "aggressive life auditing",
+    "voluntary brain smoothening",
+    "fracturing attention span",
+    "parasocial relationship building",
+]
+
+_GEMINI_OPT_IN_ENV_VAR = "REEL_CATEGORIZER_BACKEND"
+
 
 class GeminiCategorizer:
-    """Classify reel screenshots in parallel using Gemini."""
+    """Classify reel screenshots in parallel.
+
+    Default behavior is random label selection from a local pool.
+    Gemini remains available as an explicit opt-in backend.
+    """
 
     def __init__(self, max_workers: int = 4) -> None:
         self._lock = threading.Lock()
         self._thread_local = threading.local()
         self._futures: dict[int, Future[str]] = {}
         self._results: dict[int, str] = {}
+        self._assigned_topics: set[str] = set()
+        self._random = random.SystemRandom()
 
         self._api_key = self._load_api_key()
         self._model_name = self._resolve_model_name()
         self._sdk_available = self._check_sdk_available()
-        self._enabled = bool(self._api_key and self._model_name and self._sdk_available)
-        self._executor: ThreadPoolExecutor | None = (
-            ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gemini-reel")
-            if self._enabled
-            else None
+        self._gemini_ready = bool(self._api_key and self._model_name and self._sdk_available)
+        self._use_gemini_backend = self._resolve_backend_mode() == "gemini" and self._gemini_ready
+        self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="reel-topic",
         )
 
     def submit(
@@ -46,23 +99,18 @@ class GeminiCategorizer:
         analysis_frames: list[Image.Image] | None = None,
     ) -> None:
         """Submit screenshot categorization request."""
-        if self._executor is None:
-            reason = []
-            if not self._api_key:
-                reason.append("missing API key")
-            if not self._model_name:
-                reason.append("missing model")
-            if not self._sdk_available:
-                reason.append("google-genai not installed")
-            why = ", ".join(reason) if reason else "unknown reason"
-            print(f"[Gemini] Reel {reel_number}: categorizer disabled ({why}), using fallback topic.")
+        if not self._use_gemini_backend:
             with self._lock:
-                self._results[reel_number] = "Unclassified"
+                self._store_unique_result(reel_number, preferred_topic=None)
+            return
+
+        if self._executor is None:
+            with self._lock:
+                self._store_unique_result(reel_number, preferred_topic=None)
             return
 
         image_copy = screenshot.copy()
         frame_copies = [frame.copy() for frame in (analysis_frames or [])[:6]]
-        print(f"[Gemini] Reel {reel_number}: queued categorization request.")
         future = self._executor.submit(self._classify_safe, reel_number, image_copy, frame_copies)
         with self._lock:
             self._futures[reel_number] = future
@@ -71,14 +119,12 @@ class GeminiCategorizer:
         """Block until all in-flight categorization calls finish."""
         with self._lock:
             pending = dict(self._futures)
-        if pending:
-            print(f"[Gemini] Waiting for {len(pending)} in-flight categorization calls...")
+            self._futures.clear()
 
         for reel_number, future in pending.items():
             topic = future.result()
             with self._lock:
-                self._results[reel_number] = topic
-            print(f"[Gemini] Reel {reel_number}: final category='{topic}'")
+                self._store_unique_result(reel_number, preferred_topic=topic)
 
         return self.results()
 
@@ -100,10 +146,12 @@ class GeminiCategorizer:
         analysis_frames: list[Image.Image],
     ) -> str:
         try:
+            if not self._use_gemini_backend:
+                return self._random_topic()
             return self._classify(reel_number, screenshot, analysis_frames)
         except Exception as e:
-            print(f"[Gemini] Reel {reel_number}: request failed ({e}), using fallback.")
-            return "Unclassified"
+            print(f"[Categorizer] Reel {reel_number}: backend request failed ({e}), using random label.")
+            return self._random_topic()
 
     def _classify(
         self,
@@ -113,7 +161,7 @@ class GeminiCategorizer:
     ) -> str:
         client = self._get_thread_client()
         if client is None or not self._model_name:
-            return "Unclassified"
+            return self._random_topic()
 
         from google.genai import types as genai_types  # type: ignore
 
@@ -138,7 +186,7 @@ class GeminiCategorizer:
         )
         started_at = time.time()
         print(
-            f"[Gemini] Reel {reel_number}: calling model='{self._model_name}' "
+            f"[Categorizer] Reel {reel_number}: calling model='{self._model_name}' "
             f"(frames={len(frames)} bytes={total_bytes})."
         )
 
@@ -149,12 +197,12 @@ class GeminiCategorizer:
         elapsed_ms = (time.time() - started_at) * 1000.0
         raw_text = (getattr(response, "text", "") or "").strip()
         print(
-            f"[Gemini] Reel {reel_number}: response in {elapsed_ms:.0f}ms, "
+            f"[Categorizer] Reel {reel_number}: response in {elapsed_ms:.0f}ms, "
             f"raw_text={raw_text!r}"
         )
         topic = raw_text
         if not topic:
-            return "Unclassified"
+            return self._random_topic()
         # Keep category short enough for receipt width.
         topic = " ".join(topic.split())
         topic = re.sub(r"^topic\s*:\s*", "", topic, flags=re.IGNORECASE)
@@ -162,8 +210,47 @@ class GeminiCategorizer:
         topic = topic.strip(" .-")
         topic = re.sub(r"^(category|label)\s*:\s*", "", topic, flags=re.IGNORECASE)
         if topic.lower() in {"content", "video", "entertainment", "social media", "miscellaneous"}:
-            return "Unclassified"
-        return topic[:22] or "Unclassified"
+            return self._random_topic()
+        return topic[:40] or self._random_topic()
+
+    def _random_topic(self) -> str:
+        return self._random.choice(REEL_LABEL_POOL)
+
+    def _store_unique_result(self, reel_number: int, preferred_topic: str | None) -> None:
+        existing = self._results.get(reel_number)
+        if existing:
+            self._assigned_topics.discard(existing)
+        topic = self._reserve_unique_topic(preferred_topic)
+        self._results[reel_number] = topic
+
+    def _reserve_unique_topic(self, preferred_topic: str | None) -> str:
+        if preferred_topic:
+            normalized = preferred_topic.strip()
+            if normalized and normalized not in self._assigned_topics:
+                self._assigned_topics.add(normalized)
+                return normalized
+
+        remaining = [topic for topic in REEL_LABEL_POOL if topic not in self._assigned_topics]
+        if remaining:
+            chosen = self._random.choice(remaining)
+            self._assigned_topics.add(chosen)
+            return chosen
+
+        base = (preferred_topic or self._random.choice(REEL_LABEL_POOL)).strip() or "Unclassified"
+        suffix = 2
+        candidate = f"{base} #{suffix}"
+        while candidate in self._assigned_topics:
+            suffix += 1
+            candidate = f"{base} #{suffix}"
+        self._assigned_topics.add(candidate)
+        return candidate
+
+    @staticmethod
+    def _resolve_backend_mode() -> str:
+        mode = os.getenv(_GEMINI_OPT_IN_ENV_VAR, "").strip().lower()
+        if mode == "gemini":
+            return "gemini"
+        return "random"
 
     def _prepare_analysis_frames(
         self,
