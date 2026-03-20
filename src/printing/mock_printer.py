@@ -14,6 +14,7 @@ from src.printing.legacy_format import (
     LINE_WIDTH,
     ReelReceiptEntry,
     SIDE_MARGIN_MM,
+    SUMMARY_LINE_WIDTH,
     build_summary_lines,
     load_legacy_image,
     play_legacy_audio,
@@ -112,7 +113,7 @@ class MockPrinter(BasePrinter):
                 for i in range(total_reels)
             ]
 
-        lines = build_summary_lines(entries, line_width=LINE_WIDTH)
+        lines = build_summary_lines(entries, line_width=SUMMARY_LINE_WIDTH)
         for line in lines:
             self._add_receipt_line(line)
 

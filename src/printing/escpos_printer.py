@@ -13,6 +13,7 @@ from src.printing.legacy_format import (
     PRINTER_DPI,
     ReelReceiptEntry,
     SIDE_MARGIN_MM,
+    SUMMARY_LINE_WIDTH,
     build_summary_lines,
     load_legacy_image,
     mm_to_px,
@@ -358,7 +359,7 @@ class ESCPOSPrinter(BasePrinter):
         self._text_line(f"Started: {ts}", align="center", bold=False)
 
         self._reset_style()
-        self._printer.image(self._prepare_image(processed, side_margin_mm=SIDE_MARGIN_MM))
+        self._printer.image(self._prepare_image(processed, side_margin_mm=0.0))
         self._reset_style()
         self._safe_feed(1)
 
@@ -389,7 +390,7 @@ class ESCPOSPrinter(BasePrinter):
                 for i in range(total_reels)
             ]
 
-        lines = build_summary_lines(entries, line_width=LINE_WIDTH)
+        lines = build_summary_lines(entries, line_width=SUMMARY_LINE_WIDTH)
         fed_after_totals = False
 
         for idx, line in enumerate(lines):

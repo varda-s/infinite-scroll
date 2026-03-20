@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 LINE_WIDTH = 40
+SUMMARY_LINE_WIDTH = 48
 PRINTER_DPI = 203
 PRINT_WIDTH_MM = 71
 PRINT_FEED_AFTER_IMAGE = 6
