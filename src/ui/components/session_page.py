@@ -15,6 +15,10 @@ def create_session_page(
     on_stop_session: Callable[[], None],
 ) -> None:
     """Render the simplified one-page session UI."""
+    # Homepage kiosk flow always uses the physical Rongta printer.
+    if not app_state.session_active and app_state.printer_type != "rongta":
+        app_state.set_printer_type("rongta")
+
     hero_image_file = Path(__file__).resolve().parent.parent / "assets" / "images" / "thank-you-for-your-time.png"
     hero_image_url = "/assets/images/thank-you-for-your-time.png"
     page_bg = _get_image_corner_bg(hero_image_file)
@@ -186,6 +190,8 @@ def _on_session_toggle(
     if app_state.session_active:
         on_stop_session()
     else:
+        # Ensure homepage starts always target Rongta.
+        app_state.set_printer_type("rongta")
         on_start_session()
 
 
