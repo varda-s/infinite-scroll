@@ -1,19 +1,23 @@
-"""Detect reel changes from screen captures."""
+"""Detect reel changes from mirrored screen captures using optical-flow events."""
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum, auto
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from src.detection.image_utils import (
-    calculate_image_entropy,
-    compute_phash,
-    extract_center_region,
-    is_mostly_black,
-    images_are_different,
-)
+from src.detection.image_utils import compute_phash
+
+
+logger = logging.getLogger(__name__)
 
 
 class ReelChangeType(Enum):
@@ -27,81 +31,222 @@ class ReelChangeType(Enum):
     SESSION_END = auto()  # Left Reels mode (content-based detection)
 
 
+class DetectorMode(Enum):
+    """Internal state machine modes."""
+
+    IDLE = "IDLE"
+    TRANSITION = "TRANSITION"
+    SETTLING = "SETTLING"
+    COOLDOWN = "COOLDOWN"
+
+
+@dataclass
+class ReelDetectorConfig:
+    """Configurable settings for optical-flow reel change detection."""
+
+    analysis_width: int = 360
+    analysis_height: int = 640
+    expected_fps: float = 30.0
+
+    roi_x1: float = 0.15
+    roi_y1: float = 0.15
+    roi_x2: float = 0.85
+    roi_y2: float = 0.85
+
+    motion_mag_thresh: float = 1.0
+    trigger_mean_vy: float = 0.85
+    trigger_vertical_ratio: float = 1.45
+    trigger_coverage: float = 0.20
+    trigger_consistency: float = 0.55
+    trigger_consecutive_frames: int = 2
+    weak_trigger_consecutive_frames: int = 4
+    impulse_trigger_mean_vy: float = 1.75
+    impulse_trigger_vertical_ratio: float = 1.15
+    impulse_trigger_coverage: float = 0.28
+    impulse_trigger_consistency: float = 0.45
+    min_transition_displacement_px: float = 8.0
+    rearm_settle_frames: int = 3
+
+    settle_mean_mag: float = 3.0
+    settle_consecutive_frames: int = 6
+    auto_calibrate_settle: bool = True
+    settle_multiplier: float = 1.20
+    settle_history_size: int = 180
+
+    min_transition_ms: int = 80
+    max_transition_ms: int = 1200
+    cooldown_ms: int = 450
+
+    phash_hamming_min_new_reel: int = 10
+
+    ring_buffer_size: int = 120
+
+    # Best-frame selection defaults.
+    best_frame_lookback: int = 10
+    blur_laplacian_min: float = 45.0
+    brightness_min: float = 35.0
+    brightness_max: float = 220.0
+
+    # Logging cadence. 1 means every frame.
+    metric_log_interval_frames: int = 1
+
+    # Async saver settings.
+    save_output_dir: Path = field(default_factory=lambda: Path("output") / "reel_screenshots")
+    save_png: bool = True
+
+
+@dataclass
+class FlowFeatures:
+    """Optical-flow features extracted per frame pair."""
+
+    mean_abs_vx: float = 0.0
+    mean_abs_vy: float = 0.0
+    vertical_ratio: float = 0.0
+    coverage: float = 0.0
+    median_vy: float = 0.0
+    direction_consistency: float = 0.0
+    mean_mag: float = 0.0
+
+
+@dataclass
+class BufferedFrame:
+    """Frame record for best-frame selection."""
+
+    timestamp_ms: float
+    frame_bgr: np.ndarray
+    mean_mag: float
+    laplacian_var: float
+    brightness: float
+
+
+@dataclass
+class _SaveRequest:
+    path: Path
+    frame_bgr: np.ndarray
+
+
 @dataclass
 class ReelState:
     """Current state of reel detection."""
 
+    # Compatibility/publicly read by tests and call sites.
     current_hash: str | None = None
     previous_hash: str | None = None
-    is_in_transition: bool = False
-    consecutive_same_frames: int = 0
-    transition_quiet_frames: int = 0
-    ui_signature: tuple[str, str] | None = None
-    candidate_signature: tuple[str, str] | None = None
-    candidate_hash: str | None = None
-    candidate_count: int = 0
-    previous_gray: np.ndarray | None = None
-    last_motion_right: float = 0.0
-    last_motion_center: float = 0.0
-    last_vertical_shift: float = 0.0
-    last_center_vertical_shift: float = 0.0
-    last_icon_track_shift: float = 0.0
-    last_icon_track_response: float = 0.0
     last_screenshot: Image.Image | None = None
     pending_screenshot: Image.Image | None = None
-    transition_started_from_black: bool = False
-    transition_frame_count: int = 0
-    transition_peak_motion_right: float = 0.0
-    transition_peak_motion_center: float = 0.0
-    transition_peak_icon_shift: float = 0.0
-    transition_peak_vertical_shift: float = 0.0
-    transition_peak_center_vertical_shift: float = 0.0
+    consecutive_same_frames: int = 0
     frame_index: int = 0
-    last_new_reel_frame: int = -9999
-    last_scroll_frame: int = -9999
-    scroll_direction: int = 0
-    scroll_direction_frames: int = 0
+    is_in_transition: bool = False
+
+    # New state-machine fields.
+    mode: DetectorMode = DetectorMode.IDLE
+    trigger_streak: int = 0
+    weak_trigger_streak: int = 0
+    settle_streak: int = 0
+    transition_started_at_frame: int = 0
     cooldown_until_frame: int = 0
-    waiting_for_post_reel_stable: bool = False
-    post_reel_stable_frames: int = 0
+    previous_roi_gray: np.ndarray | None = None
+    last_features: FlowFeatures = field(default_factory=FlowFeatures)
+    motion_floor_ema: float = 0.0
+    transition_cumulative_vy: float = 0.0
+    armed_for_transition: bool = True
+
+
+class AsyncScreenshotSaver:
+    """Write screenshots asynchronously to avoid detector-loop stalls."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._queue: queue.Queue[_SaveRequest] = queue.Queue(maxsize=256)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="reel-saver",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, path: Path, frame_bgr: np.ndarray) -> None:
+        try:
+            self._queue.put_nowait(_SaveRequest(path=path, frame_bgr=frame_bgr.copy()))
+        except queue.Full:
+            logger.warning("screenshot_save_dropped reason=queue_full path=%s", path)
+
+    def close(self, timeout_s: float = 2.0) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=timeout_s)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set() or not self._queue.empty():
+            try:
+                task = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                task.path.parent.mkdir(parents=True, exist_ok=True)
+                ok = cv2.imwrite(str(task.path), task.frame_bgr)
+                if ok:
+                    logger.info("screenshot_saved path=%s", task.path)
+                else:
+                    logger.warning("screenshot_save_failed path=%s", task.path)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.exception("screenshot_save_exception path=%s err=%r", task.path, exc)
+            finally:
+                self._queue.task_done()
 
 
 class ReelDetector:
-    """Detect when user scrolls to a new reel."""
+    """Detect when user swipes to a new reel via dense optical flow."""
 
     def __init__(
         self,
         hash_threshold: int = 15,
         transition_frames: int = 3,
         stable_frames: int = 2,
-        new_reel_cooldown_frames: int = 22,
-        post_reel_stable_release_frames: int = 4,
+        detector_config: ReelDetectorConfig | None = None,
+        output_dir: Path | None = None,
+        save_screenshots: bool = False,
     ) -> None:
         """Initialize reel detector.
 
         Args:
-            hash_threshold: Minimum hash difference to consider a new reel.
-            transition_frames: Number of frames to wait during transition.
-            stable_frames: Number of same frames needed to confirm stable content.
+            hash_threshold: Backward-compatible dedupe threshold override.
+            transition_frames: Backward-compatible trigger streak override.
+            stable_frames: Number of stable frames for `is_stable()` API.
+            detector_config: Optional full detector config.
+            output_dir: Optional output directory for async screenshot writing.
+            save_screenshots: Enable async screenshot writing.
         """
         self.hash_threshold = hash_threshold
         self.transition_frames = transition_frames
         self.stable_frames = stable_frames
-        # Thresholds tuned from observed Instagram reel scroll dynamics.
-        self.swipe_motion_right_threshold = 4.5
-        self.swipe_motion_center_threshold = 7.0
-        self.swipe_vertical_shift_threshold = 2.0
-        self.swipe_center_vertical_shift_threshold = 3.5
-        self.icon_track_shift_threshold = 4.0
-        self.icon_track_min_response = 0.35
-        self.settle_motion_right_threshold = 7.5
-        self.settle_motion_center_threshold = 8.5
-        self.signature_change_threshold = 8
-        # Prevent duplicate NEW_REEL bursts from a single swipe.
-        self.min_new_reel_gap_frames = 8
-        self.new_reel_cooldown_frames = new_reel_cooldown_frames
-        self.post_reel_stable_release_frames = post_reel_stable_release_frames
+
+        self.config = detector_config or ReelDetectorConfig()
+        # Preserve old constructor semantics while keeping config tunable.
+        self.config.trigger_consecutive_frames = max(1, int(transition_frames))
+        self.config.phash_hamming_min_new_reel = int(hash_threshold)
+
+        if output_dir is not None:
+            self.config.save_output_dir = Path(output_dir) / "reel_screenshots"
+
+        # Compatibility attributes used in older tests.
+        self.swipe_motion_right_threshold = self.config.trigger_mean_vy
+        self.swipe_motion_center_threshold = self.config.trigger_mean_vy
+        self.settle_motion_right_threshold = self.config.settle_mean_mag
+        self.settle_motion_center_threshold = self.config.settle_mean_mag
+
         self._state = ReelState()
+        self._ring_buffer: deque[BufferedFrame] = deque(maxlen=self.config.ring_buffer_size)
+        self._idle_motion_history: deque[float] = deque(maxlen=self.config.settle_history_size)
+        self._saved_reel_count = 0
+        self._last_saved_phash: str | None = None
+        self._first_frame_emitted = False
+        self._audio_boost_until_frame: int = 0
+
+        self._dis_flow = self._create_dis_flow()
+        self._saver = AsyncScreenshotSaver(self.config.save_output_dir) if save_screenshots else None
 
     @property
     def current_hash(self) -> str | None:
@@ -113,529 +258,531 @@ class ReelDetector:
         """Get last stable screenshot."""
         return self._state.last_screenshot
 
+    def close(self) -> None:
+        """Close any background workers."""
+        if self._saver is not None:
+            self._saver.close()
+            self._saver = None
+
     def reset(self) -> None:
         """Reset detector state."""
         self._state = ReelState()
+        self._ring_buffer.clear()
+        self._idle_motion_history.clear()
+        self._saved_reel_count = 0
+        self._last_saved_phash = None
+        self._first_frame_emitted = False
+        self._audio_boost_until_frame = 0
 
-    def _compute_content_hash(self, frame: Image.Image) -> str:
-        """Compute hash focusing on content area.
+    def _ms_to_frames(self, milliseconds: int) -> int:
+        fps = max(self.config.expected_fps, 1.0)
+        return max(1, int(round((milliseconds / 1000.0) * fps)))
 
-        Args:
-            frame: Full screenshot.
+    def _create_dis_flow(self):
+        preset = getattr(cv2, "DISOPTICAL_FLOW_PRESET_FAST", None)
+        try:
+            if preset is None:
+                return None
+            if hasattr(cv2, "DISOpticalFlow_create"):
+                return cv2.DISOpticalFlow_create(preset)
+            if hasattr(cv2, "DISOpticalFlow") and hasattr(cv2.DISOpticalFlow, "create"):
+                return cv2.DISOpticalFlow.create(preset)
+        except Exception:  # pragma: no cover - guarded fallback
+            return None
+        return None
 
-        Returns:
-            Hash string.
-        """
-        # Extract center region to focus on content, not UI
-        content_region = extract_center_region(frame, width_ratio=0.9, height_ratio=0.7)
-        hash_obj = compute_phash(content_region)
-        return str(hash_obj)
+    def _to_bgr(self, frame: Image.Image) -> np.ndarray:
+        rgb = np.array(frame.convert("RGB"), dtype=np.uint8)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-    def _compute_ui_signature(self, frame: Image.Image) -> tuple[str, str]:
-        """Compute signature from UI regions that change between reels."""
-        width, height = frame.size
-        # Focus on overlay masks rather than raw pixels so video-content motion
-        # contributes less to the signature than the fixed Instagram UI chrome.
-        right = frame.crop(
-            (
-                int(width * 0.81),
-                int(height * 0.24),
-                int(width * 0.95),
-                int(height * 0.90),
-            )
-        )
-        bottom = frame.crop(
-            (
-                int(width * 0.04),
-                int(height * 0.76),
-                int(width * 0.78),
-                int(height * 0.94),
-            )
+    def _analysis_roi_gray(self, frame_bgr: np.ndarray) -> np.ndarray:
+        resized = cv2.resize(
+            frame_bgr,
+            (self.config.analysis_width, self.config.analysis_height),
+            interpolation=cv2.INTER_AREA,
         )
 
-        right_mask = self._ui_overlay_mask(right, size=(80, 200))
-        bottom_mask = self._ui_overlay_mask(bottom, size=(240, 80))
-        return (str(compute_phash(right_mask, hash_size=12)), str(compute_phash(bottom_mask, hash_size=12)))
+        h, w = resized.shape[:2]
+        x1 = int(w * self.config.roi_x1)
+        y1 = int(h * self.config.roi_y1)
+        x2 = int(w * self.config.roi_x2)
+        y2 = int(h * self.config.roi_y2)
 
-    def _ui_overlay_mask(self, region: Image.Image, size: tuple[int, int]) -> Image.Image:
-        """Extract a coarse binary mask of bright UI overlay elements."""
-        gray = np.array(region.convert("L").resize(size, Image.Resampling.BILINEAR))
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        # Instagram reel UI text/icons are usually high-contrast overlay glyphs.
-        _, mask = cv2.threshold(blur, 150, 255, cv2.THRESH_BINARY)
-        return Image.fromarray(mask)
+        x1 = max(0, min(x1, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        x2 = max(x1 + 1, min(x2, w))
+        y2 = max(y1 + 1, min(y2, h))
 
-    def _signature_distance(
-        self, sig1: tuple[str, str] | None, sig2: tuple[str, str] | None
-    ) -> int:
-        """Compute Hamming-like distance between two UI signatures."""
-        if sig1 is None or sig2 is None:
-            return 64
+        roi = resized[y1:y2, x1:x2]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(gray, (5, 5), 0)
+
+    def _compute_flow(self, prev_gray: np.ndarray, curr_gray: np.ndarray) -> np.ndarray:
+        if self._dis_flow is not None:
+            return self._dis_flow.calc(prev_gray, curr_gray, None)
+
+        return cv2.calcOpticalFlowFarneback(
+            prev_gray,
+            curr_gray,
+            None,
+            0.5,
+            3,
+            15,
+            3,
+            5,
+            1.2,
+            0,
+        )
+
+    def _extract_features(self, curr_roi_gray: np.ndarray) -> FlowFeatures:
+        prev = self._state.previous_roi_gray
+        self._state.previous_roi_gray = curr_roi_gray
+        if prev is None:
+            return FlowFeatures()
+
+        flow = self._compute_flow(prev, curr_roi_gray)
+        vx = flow[..., 0]
+        vy = flow[..., 1]
+        mag = np.sqrt((vx * vx) + (vy * vy))
+
+        mean_abs_vx = float(np.mean(np.abs(vx)))
+        mean_abs_vy = float(np.mean(np.abs(vy)))
+        vertical_ratio = mean_abs_vy / (mean_abs_vx + 1e-6)
+        coverage_mask = mag > self.config.motion_mag_thresh
+        coverage = float(np.mean(coverage_mask))
+
+        median_vy = 0.0
+        direction_consistency = 0.0
+        if np.any(coverage_mask):
+            moving_vy = vy[coverage_mask]
+            median_vy = float(np.median(moving_vy))
+            if abs(median_vy) > 1e-6:
+                direction_consistency = float(
+                    np.mean(np.sign(moving_vy) == np.sign(median_vy))
+                )
+
+        mean_mag = float(np.mean(mag))
+
+        return FlowFeatures(
+            mean_abs_vx=mean_abs_vx,
+            mean_abs_vy=mean_abs_vy,
+            vertical_ratio=vertical_ratio,
+            coverage=coverage,
+            median_vy=median_vy,
+            direction_consistency=direction_consistency,
+            mean_mag=mean_mag,
+        )
+
+    def _is_swipe_candidate(self, features: FlowFeatures) -> bool:
+        return (
+            features.mean_abs_vy >= self.config.trigger_mean_vy
+            and features.vertical_ratio >= self.config.trigger_vertical_ratio
+            and features.coverage >= self.config.trigger_coverage
+            and features.direction_consistency >= self.config.trigger_consistency
+        )
+
+    def _is_weak_swipe_candidate(self, features: FlowFeatures) -> bool:
+        return (
+            features.mean_abs_vy >= (self.config.trigger_mean_vy * 0.65)
+            and features.vertical_ratio >= (self.config.trigger_vertical_ratio * 0.70)
+            and features.coverage >= (self.config.trigger_coverage * 0.70)
+        )
+
+    def _is_impulse_swipe_candidate(self, features: FlowFeatures) -> bool:
+        return (
+            features.mean_abs_vy >= self.config.impulse_trigger_mean_vy
+            and features.vertical_ratio >= self.config.impulse_trigger_vertical_ratio
+            and features.coverage >= self.config.impulse_trigger_coverage
+            and features.direction_consistency >= self.config.impulse_trigger_consistency
+        )
+
+    def _effective_settle_threshold(self) -> float:
+        if not self.config.auto_calibrate_settle:
+            return self.config.settle_mean_mag
+        if len(self._idle_motion_history) < 20:
+            return self.config.settle_mean_mag
+        baseline = float(np.percentile(np.array(self._idle_motion_history), 40))
+        return max(
+            self.config.settle_mean_mag,
+            baseline * self.config.settle_multiplier,
+        )
+
+    def _is_settled_frame(self, features: FlowFeatures) -> bool:
+        return features.mean_mag <= self._effective_settle_threshold()
+
+    def _compute_frame_phash(self, frame_bgr: np.ndarray) -> str:
+        # Prefer OpenCV img_hash if available, fall back to imagehash.
+        img_hash = getattr(cv2, "img_hash", None)
+        if img_hash is not None and hasattr(img_hash, "PHash_create"):
+            try:
+                phasher = img_hash.PHash_create()
+                value = phasher.compute(frame_bgr)
+                return f"cv2:{value.tobytes().hex()}"
+            except Exception:
+                pass
+
+        pil = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        return f"ih:{str(compute_phash(pil, hash_size=8))}"
+
+    def _phash_distance(self, h1: str | None, h2: str | None) -> int:
+        if h1 is None or h2 is None:
+            return 10_000
+
+        if h1.startswith("cv2:") and h2.startswith("cv2:"):
+            b1 = bytes.fromhex(h1.split(":", 1)[1])
+            b2 = bytes.fromhex(h2.split(":", 1)[1])
+            a1 = np.frombuffer(b1, dtype=np.uint8).reshape(1, -1)
+            a2 = np.frombuffer(b2, dtype=np.uint8).reshape(1, -1)
+            return int(cv2.norm(a1, a2, cv2.NORM_HAMMING))
+
+        # imagehash fallback format.
         try:
             from imagehash import hex_to_hash
 
-            return (hex_to_hash(sig1[0]) - hex_to_hash(sig2[0])) + (
-                hex_to_hash(sig1[1]) - hex_to_hash(sig2[1])
+            x1 = h1.split(":", 1)[1]
+            x2 = h2.split(":", 1)[1]
+            return int(hex_to_hash(x1) - hex_to_hash(x2))
+        except Exception:
+            return 10_000
+
+    def _buffer_frame(self, frame_bgr: np.ndarray, features: FlowFeatures, timestamp_ms: float) -> None:
+        analysis_gray = cv2.cvtColor(
+            cv2.resize(
+                frame_bgr,
+                (self.config.analysis_width, self.config.analysis_height),
+                interpolation=cv2.INTER_AREA,
+            ),
+            cv2.COLOR_BGR2GRAY,
+        )
+
+        lap_var = float(cv2.Laplacian(analysis_gray, cv2.CV_64F).var())
+        brightness = float(np.mean(analysis_gray))
+
+        self._ring_buffer.append(
+            BufferedFrame(
+                timestamp_ms=timestamp_ms,
+                frame_bgr=frame_bgr.copy(),
+                mean_mag=features.mean_mag,
+                laplacian_var=lap_var,
+                brightness=brightness,
             )
-        except Exception:
-            return 64
-
-    def _single_hash_distance(self, h1: str | None, h2: str | None) -> int:
-        """Compute hash distance for a single hex hash string."""
-        if not h1 or not h2:
-            return 64
-        try:
-            from imagehash import hex_to_hash
-
-            return int(hex_to_hash(h1) - hex_to_hash(h2))
-        except Exception:
-            return 64
-
-    def _hash_distance(self, h1: str | None, h2: str | None) -> int:
-        """Compute pHash distance between two hash strings."""
-        if not h1 or not h2:
-            return 64
-        try:
-            from imagehash import hex_to_hash
-
-            return int(hex_to_hash(h1) - hex_to_hash(h2))
-        except Exception:
-            return 64
-
-    def _is_reel_change(self, new_sig: tuple[str, str], current_hash: str) -> bool:
-        """Decide whether settled content truly represents a new reel."""
-        old_sig = self._state.ui_signature
-        right_diff = self._single_hash_distance(
-            new_sig[0], old_sig[0] if old_sig else None
         )
-        bottom_diff = self._single_hash_distance(
-            new_sig[1], old_sig[1] if old_sig else None
-        )
-        content_diff = self._hash_distance(current_hash, self._state.current_hash)
 
-        # Primary signal: both stable UI anchor regions changed.
-        if right_diff >= 4 and bottom_diff >= 4:
-            return True
-        # Strong right-rail change is often enough on its own.
-        if right_diff >= 7:
-            return True
-        # Bottom/caption drift needs backing from content drift.
-        if bottom_diff >= 8 and content_diff >= 10:
-            return True
-        # Conservative fallback: moderate UI drift plus strong content shift.
-        if right_diff >= 3 and bottom_diff >= 5 and content_diff >= 12:
-            return True
-        return False
+    def _select_best_frame(self) -> BufferedFrame | None:
+        if not self._ring_buffer:
+            return None
 
-    def _same_signature(
-        self,
-        sig1: tuple[str, str] | None,
-        sig2: tuple[str, str] | None,
-        tolerance: int = 2,
-    ) -> bool:
-        """Return True when two UI signatures are effectively the same reel."""
-        if sig1 is None or sig2 is None:
-            return False
-        right_diff = self._single_hash_distance(sig1[0], sig2[0])
-        bottom_diff = self._single_hash_distance(sig1[1], sig2[1])
-        return right_diff <= tolerance and bottom_diff <= tolerance
+        recent = list(self._ring_buffer)[-self.config.best_frame_lookback :]
+        if not recent:
+            return self._ring_buffer[-1]
 
-    def _reset_candidate(self) -> None:
-        self._state.candidate_signature = None
-        self._state.candidate_hash = None
-        self._state.candidate_count = 0
-        self._state.pending_screenshot = None
+        acceptable = [
+            frame
+            for frame in recent
+            if frame.laplacian_var >= self.config.blur_laplacian_min
+            and self.config.brightness_min <= frame.brightness <= self.config.brightness_max
+        ]
 
-    def _confirm_candidate_reel(
-        self,
-        frame: Image.Image,
-        current_hash: str,
-        new_sig: tuple[str, str],
-    ) -> ReelChangeType:
-        """Confirm a new reel from stable UI signatures."""
-        if self._same_signature(new_sig, self._state.ui_signature):
-            self._reset_candidate()
-            self._state.last_screenshot = frame.copy()
-            self._state.consecutive_same_frames += 1
+        candidates = acceptable if acceptable else recent
+
+        def score(frame: BufferedFrame) -> tuple[float, float]:
+            motion_score = 1.0 / (1.0 + max(frame.mean_mag, 0.0))
+            sharp_score = min(
+                frame.laplacian_var / max(self.config.blur_laplacian_min * 3.0, 1.0),
+                1.0,
+            )
+            brightness_mid = (self.config.brightness_min + self.config.brightness_max) / 2.0
+            brightness_half_span = max((self.config.brightness_max - self.config.brightness_min) / 2.0, 1.0)
+            brightness_score = max(
+                0.0,
+                1.0 - (abs(frame.brightness - brightness_mid) / brightness_half_span),
+            )
+            total = (0.5 * motion_score) + (0.3 * sharp_score) + (0.2 * brightness_score)
+            return total, frame.timestamp_ms
+
+        return max(candidates, key=score)
+
+    def _enter_cooldown(self, frame_index: int) -> None:
+        self._state.mode = DetectorMode.COOLDOWN
+        self._state.cooldown_until_frame = frame_index + self._ms_to_frames(self.config.cooldown_ms)
+        self._state.trigger_streak = 0
+        self._state.weak_trigger_streak = 0
+        self._state.settle_streak = 0
+        self._state.is_in_transition = False
+        self._state.transition_cumulative_vy = 0.0
+        self._state.armed_for_transition = False
+
+    def _emit_save(self, frame_bgr: np.ndarray) -> Path | None:
+        if self._saver is None or not self.config.save_png:
+            return None
+
+        self._saved_reel_count += 1
+        path = self.config.save_output_dir / f"reel_{self._saved_reel_count:04d}.png"
+        self._saver.submit(path=path, frame_bgr=frame_bgr)
+        return path
+
+    def _confirm_new_reel(self, frame_index: int) -> ReelChangeType:
+        best = self._select_best_frame()
+        if best is None:
+            logger.info("reel_rejected reason=no_buffered_frame")
+            self._enter_cooldown(frame_index)
             return ReelChangeType.NONE
 
-        if not self._is_reel_change(new_sig, current_hash):
-            self._reset_candidate()
-            self._state.last_screenshot = frame.copy()
-            self._state.consecutive_same_frames += 1
-            return ReelChangeType.NONE
+        candidate_hash = self._compute_frame_phash(best.frame_bgr)
+        hash_distance = self._phash_distance(candidate_hash, self._last_saved_phash)
 
-        if self._same_signature(new_sig, self._state.candidate_signature):
-            self._state.candidate_count += 1
-        else:
-            self._state.candidate_signature = new_sig
-            self._state.candidate_hash = current_hash
-            self._state.candidate_count = 1
-            self._state.pending_screenshot = frame.copy()
-
-        if self._state.candidate_count < self.stable_frames:
-            self._state.consecutive_same_frames += 1
+        if self._last_saved_phash is not None and hash_distance < self.config.phash_hamming_min_new_reel:
+            logger.info(
+                "reel_rejected reason=phash_duplicate distance=%d threshold=%d",
+                hash_distance,
+                self.config.phash_hamming_min_new_reel,
+            )
+            self._enter_cooldown(frame_index)
             return ReelChangeType.NONE
 
         self._state.previous_hash = self._state.current_hash
-        self._state.current_hash = self._state.candidate_hash or current_hash
-        self._state.ui_signature = self._state.candidate_signature or new_sig
-        self._state.last_screenshot = self._state.pending_screenshot or frame.copy()
-        self._state.is_in_transition = False
-        self._state.transition_started_from_black = False
-        self._state.transition_quiet_frames = 0
-        self._state.transition_frame_count = 0
-        self._state.transition_peak_motion_right = 0.0
-        self._state.transition_peak_motion_center = 0.0
-        self._state.transition_peak_icon_shift = 0.0
-        self._state.transition_peak_vertical_shift = 0.0
-        self._state.transition_peak_center_vertical_shift = 0.0
-        self._state.consecutive_same_frames = 1
-        self._reset_candidate()
-        if self._can_emit_new_reel():
-            self._state.waiting_for_post_reel_stable = True
-            self._state.post_reel_stable_frames = 0
-            return ReelChangeType.NEW_REEL
-        return ReelChangeType.NONE
+        self._state.current_hash = candidate_hash
+        self._last_saved_phash = candidate_hash
 
-    def _estimate_vertical_shift(self, prev: np.ndarray, curr: np.ndarray) -> float:
-        """Estimate dominant vertical shift via row-profile cross correlation."""
-        if prev.size == 0 or curr.size == 0:
-            return 0.0
-        p = prev.mean(axis=1).astype(np.float32)
-        c = curr.mean(axis=1).astype(np.float32)
-        p -= p.mean()
-        c -= c.mean()
-        if np.allclose(p, 0) or np.allclose(c, 0):
-            return 0.0
-        corr = np.correlate(c, p, mode="full")
-        lag = int(np.argmax(corr) - (len(p) - 1))
-        return float(lag)
+        screenshot_rgb = cv2.cvtColor(best.frame_bgr, cv2.COLOR_BGR2RGB)
+        screenshot = Image.fromarray(screenshot_rgb)
+        self._state.last_screenshot = screenshot
+        self._state.pending_screenshot = screenshot
 
-    def _can_emit_new_reel(self) -> bool:
-        """Prevent duplicate NEW_REEL bursts during one swipe transition."""
-        if self._state.frame_index < self._state.cooldown_until_frame:
-            return False
-        if self._state.frame_index - self._state.last_new_reel_frame < self.min_new_reel_gap_frames:
-            return False
-        self._state.last_new_reel_frame = self._state.frame_index
-        self._state.cooldown_until_frame = self._state.frame_index + self.new_reel_cooldown_frames
-        return True
+        save_path = self._emit_save(best.frame_bgr)
 
-    def _has_recent_scroll_gesture(self, max_age_frames: int = 8) -> bool:
-        """Return True if a vertical swipe-like motion was seen recently."""
-        return (self._state.frame_index - self._state.last_scroll_frame) <= max_age_frames
-
-    def _compute_motion_metrics(self, frame: Image.Image) -> tuple[float, float, float, float, float, float]:
-        """Compute right/center motion and vertical shifts."""
-        gray = np.array(frame.convert("L").resize((216, 468), Image.Resampling.BILINEAR))
-        prev = self._state.previous_gray
-        self._state.previous_gray = gray
-
-        if prev is None:
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-
-        w = gray.shape[1]
-        right_slice = slice(int(w * 0.76), w)
-        center_slice = slice(int(w * 0.20), int(w * 0.80))
-
-        right = gray[:, right_slice]
-        prev_right = prev[:, right_slice]
-        center = gray[:, center_slice]
-        prev_center = prev[:, center_slice]
-
-        motion_right = float(np.mean(np.abs(right.astype(np.int16) - prev_right.astype(np.int16))))
-        motion_center = float(np.mean(np.abs(center.astype(np.int16) - prev_center.astype(np.int16))))
-        vertical_shift = self._estimate_vertical_shift(prev_right, right)
-        center_vertical_shift = self._estimate_vertical_shift(prev_center, center)
-        icon_track_shift = 0.0
-        icon_track_response = 0.0
-        try:
-            # Icon-focused tracking: isolate bright UI glyphs/text in the
-            # right interaction rail so video-content motion contributes less.
-            prev_mask = (prev_right >= 170).astype(np.float32)
-            curr_mask = (right >= 170).astype(np.float32)
-            if float(prev_mask.mean()) >= 0.01 and float(curr_mask.mean()) >= 0.01:
-                (_dx, dy), response = cv2.phaseCorrelate(prev_mask, curr_mask)
-            else:
-                (_dx, dy), response = cv2.phaseCorrelate(
-                    prev_right.astype(np.float32), right.astype(np.float32)
-                )
-            icon_track_shift = abs(float(dy))
-            icon_track_response = float(response)
-        except Exception:
-            pass
-
-        self._state.last_motion_right = motion_right
-        self._state.last_motion_center = motion_center
-        self._state.last_vertical_shift = vertical_shift
-        self._state.last_center_vertical_shift = center_vertical_shift
-        self._state.last_icon_track_shift = icon_track_shift
-        self._state.last_icon_track_response = icon_track_response
-        return (
-            motion_right,
-            motion_center,
-            vertical_shift,
-            center_vertical_shift,
-            icon_track_shift,
-            icon_track_response,
+        logger.info(
+            "reel_confirmed frame=%d phash_distance=%d saved_path=%s",
+            frame_index,
+            hash_distance,
+            save_path,
         )
 
-    def _is_transition_frame(self, frame: Image.Image) -> bool:
-        """Check if frame appears to be a transition (loading/scrolling).
+        self._enter_cooldown(frame_index)
+        return ReelChangeType.NEW_REEL
 
-        Args:
-            frame: Frame to check.
+    def _log_features(self, features: FlowFeatures) -> None:
+        if self.config.metric_log_interval_frames <= 0:
+            return
+        if (self._state.frame_index % self.config.metric_log_interval_frames) != 0:
+            return
 
-        Returns:
-            True if frame appears to be transitioning.
-        """
-        # Use only center content and require both high darkness and very low
-        # entropy. This avoids false transition loops on dark reels.
-        center = extract_center_region(frame, width_ratio=0.6, height_ratio=0.65)
-        return is_mostly_black(center, threshold=0.88) and calculate_image_entropy(center) < 2.0
+        logger.debug(
+            (
+                "reel_features state=%s mean_abs_vx=%.3f mean_abs_vy=%.3f "
+                "vertical_ratio=%.3f coverage=%.3f direction_consistency=%.3f mean_mag=%.3f "
+                "settle_threshold=%.3f"
+            ),
+            self._state.mode.value,
+            features.mean_abs_vx,
+            features.mean_abs_vy,
+            features.vertical_ratio,
+            features.coverage,
+            features.direction_consistency,
+            features.mean_mag,
+            self._effective_settle_threshold(),
+        )
+
+    def notify_audio_switch(self, boost_ms: int = 650) -> None:
+        """Optionally boost transition confidence after an audio cut/switch event."""
+        self._audio_boost_until_frame = self._state.frame_index + self._ms_to_frames(max(0, boost_ms))
+
+    def _bootstrap_first_reel(self, frame_bgr: np.ndarray, frame_index: int) -> ReelChangeType:
+        first_hash = self._compute_frame_phash(frame_bgr)
+        self._state.current_hash = first_hash
+        self._last_saved_phash = first_hash
+
+        screenshot_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        screenshot = Image.fromarray(screenshot_rgb)
+        self._state.last_screenshot = screenshot
+        self._state.pending_screenshot = screenshot
+        self._state.consecutive_same_frames = 1
+        self._first_frame_emitted = True
+
+        save_path = self._emit_save(frame_bgr)
+        logger.info("reel_confirmed_first_frame frame=%d saved_path=%s", frame_index, save_path)
+
+        self._enter_cooldown(frame_index)
+        return ReelChangeType.NEW_REEL
 
     def process_frame(self, frame: Image.Image) -> ReelChangeType:
-        """Process a new frame and detect reel changes.
-
-        Args:
-            frame: New screenshot frame.
-
-        Returns:
-            Type of change detected.
-        """
+        """Process a new frame and detect reel changes."""
         self._state.frame_index += 1
-        (
-            motion_right,
-            motion_center,
-            vertical_shift,
-            center_vertical_shift,
-            icon_track_shift,
-            icon_track_response,
-        ) = self._compute_motion_metrics(frame)
-        settled_now = (
-            motion_right <= self.settle_motion_right_threshold
-            and motion_center <= self.settle_motion_center_threshold
-        )
+        frame_index = self._state.frame_index
 
-        # After counting a new reel, require a short stable window before
-        # allowing another transition. This suppresses double/triple counts
-        # caused by one physical swipe producing multiple transition bursts.
-        if self._state.waiting_for_post_reel_stable:
-            if settled_now:
-                self._state.post_reel_stable_frames += 1
-            else:
-                self._state.post_reel_stable_frames = 0
+        frame_bgr = self._to_bgr(frame)
+        roi_gray = self._analysis_roi_gray(frame_bgr)
+        features = self._extract_features(roi_gray)
+        self._state.last_features = features
+        timestamp_ms = (frame_index * 1000.0) / max(self.config.expected_fps, 1.0)
+        self._buffer_frame(frame_bgr, features, timestamp_ms)
+        self._log_features(features)
 
-            if self._state.post_reel_stable_frames < self.post_reel_stable_release_frames:
-                self._state.consecutive_same_frames += 1
-                return ReelChangeType.NONE
-
-            self._state.waiting_for_post_reel_stable = False
-            self._state.post_reel_stable_frames = 0
-
-        # Track coherent vertical scroll direction to reject random motion bursts.
-        dominant_shift = (
-            center_vertical_shift
-            if abs(center_vertical_shift) >= abs(vertical_shift)
-            else vertical_shift
-        )
-        if abs(dominant_shift) >= 2.0:
-            direction = 1 if dominant_shift > 0 else -1
-            if direction == self._state.scroll_direction:
-                self._state.scroll_direction_frames += 1
-            else:
-                self._state.scroll_direction = direction
-                self._state.scroll_direction_frames = 1
-        else:
-            self._state.scroll_direction = 0
-            self._state.scroll_direction_frames = 0
-
-        # Only count new reels when we have evidence of user scroll gesture.
-        if self._state.scroll_direction_frames >= 2 and (
-            (
-                icon_track_shift >= self.icon_track_shift_threshold
-                and icon_track_response >= self.icon_track_min_response
-                and motion_right >= 5.0
-                and (
-                    abs(center_vertical_shift) >= 2.0
-                    or abs(vertical_shift) >= 1.5
-                )
-            )
-            or (
-                abs(center_vertical_shift) >= self.swipe_center_vertical_shift_threshold
-                and motion_center >= 6.0
-            )
-            or (
-                abs(vertical_shift) >= self.swipe_vertical_shift_threshold
-                and motion_center >= 6.0
-            )
+        # Calibrate expected in-reel motion floor from non-transition frames.
+        if (
+            self._state.mode in (DetectorMode.IDLE, DetectorMode.COOLDOWN)
+            and not self._is_swipe_candidate(features)
+            and features.mean_mag > 0.0
         ):
-            self._state.last_scroll_frame = self._state.frame_index
-
-        # Track peak motion while transition is active.
-        if self._state.is_in_transition:
-            self._state.transition_peak_motion_right = max(
-                self._state.transition_peak_motion_right, motion_right
-            )
-            self._state.transition_peak_motion_center = max(
-                self._state.transition_peak_motion_center, motion_center
-            )
-            self._state.transition_peak_icon_shift = max(
-                self._state.transition_peak_icon_shift, icon_track_shift
-            )
-            self._state.transition_peak_vertical_shift = max(
-                self._state.transition_peak_vertical_shift,
-                abs(vertical_shift),
-            )
-            self._state.transition_peak_center_vertical_shift = max(
-                self._state.transition_peak_center_vertical_shift,
-                abs(center_vertical_shift),
-            )
-
-        # Treat near-black frames as transition only if a swipe transition is
-        # already active; dark reels should not start transitions by themselves.
-        if self._state.is_in_transition and self._is_transition_frame(frame):
-            self._state.transition_started_from_black = True
-            self._state.transition_quiet_frames = 0
-            self._reset_candidate()
-            self._state.consecutive_same_frames = 0
-            return ReelChangeType.TRANSITION
-
-        # Compute hash for current frame
-        current_hash = self._compute_content_hash(frame)
-
-        # First frame initialization
-        if self._state.current_hash is None:
-            self._state.current_hash = current_hash
-            self._state.ui_signature = self._compute_ui_signature(frame)
-            self._state.last_screenshot = frame.copy()
-            self._state.consecutive_same_frames = 1
-            return ReelChangeType.NEW_REEL if self._can_emit_new_reel() else ReelChangeType.NONE
-        new_sig = self._compute_ui_signature(frame)
-        if self._state.is_in_transition:
-            self._state.transition_frame_count += 1
-
-            settled = (
-                motion_right <= self.settle_motion_right_threshold
-                and motion_center <= self.settle_motion_center_threshold
-            )
-            if settled:
-                self._state.transition_quiet_frames += 1
-                # Use one of the first stable frames of the new reel.
-                if self._state.pending_screenshot is None:
-                    self._state.pending_screenshot = frame.copy()
+            self._idle_motion_history.append(features.mean_mag)
+            if self._state.motion_floor_ema <= 0.0:
+                self._state.motion_floor_ema = features.mean_mag
             else:
-                self._state.transition_quiet_frames = 0
-                self._reset_candidate()
+                alpha = 0.03
+                self._state.motion_floor_ema = (
+                    (1.0 - alpha) * self._state.motion_floor_ema
+                ) + (alpha * features.mean_mag)
 
-            transition_was_real_swipe = (
-                self._state.transition_peak_motion_right >= 6.0
-                and self._state.transition_peak_motion_center >= 7.0
-                and (
-                    self._state.transition_peak_center_vertical_shift >= 3.0
-                    or self._state.transition_peak_vertical_shift >= 2.0
-                    or self._state.transition_peak_icon_shift >= 4.0
-                )
-                and self._has_recent_scroll_gesture(max_age_frames=60)
-            )
-
-            if settled and transition_was_real_swipe:
-                return self._confirm_candidate_reel(frame, current_hash, new_sig)
-
-            if self._state.transition_quiet_frames >= self.transition_frames:
-                self._state.is_in_transition = False
-                self._state.transition_started_from_black = False
-                self._state.transition_quiet_frames = 0
-                self._state.transition_frame_count = 0
-                self._state.consecutive_same_frames = 1
-                self._reset_candidate()
-                self._state.transition_peak_motion_right = 0.0
-                self._state.transition_peak_motion_center = 0.0
-                self._state.transition_peak_icon_shift = 0.0
-                self._state.transition_peak_vertical_shift = 0.0
-                self._state.transition_peak_center_vertical_shift = 0.0
-                return ReelChangeType.NONE
-
-            # Escape hatch: avoid getting stuck in transition state forever due
-            # noisy motion. After a short timeout, decide using hash/signature.
-            if self._state.transition_frame_count >= 10:
-                self._state.is_in_transition = False
-                self._state.transition_started_from_black = False
-                self._state.transition_quiet_frames = 0
-                self._state.transition_frame_count = 0
-                self._state.consecutive_same_frames = 1
-                self._reset_candidate()
-                self._state.transition_peak_motion_right = 0.0
-                self._state.transition_peak_motion_center = 0.0
-                self._state.transition_peak_icon_shift = 0.0
-                self._state.transition_peak_vertical_shift = 0.0
-                self._state.transition_peak_center_vertical_shift = 0.0
-                return ReelChangeType.NONE
-
-            return ReelChangeType.TRANSITION
-
-        # Stable frames can still reveal a new reel even if explicit motion
-        # tracking missed the swipe onset; confirm via fixed UI regions.
-        if settled_now and self._has_recent_scroll_gesture(max_age_frames=max(18, self.new_reel_cooldown_frames)):
-            return self._confirm_candidate_reel(frame, current_hash, new_sig)
-        self._reset_candidate()
-
-        # Detect swipe onset from motion burst: right icon rail moves with content.
-        # This must run only when we're not already in transition; otherwise
-        # transition counters get reset every frame and NEW_REEL is never emitted.
-        swipe_motion = (
-            (
-                (
-                    motion_right >= self.swipe_motion_right_threshold
-                    and motion_center >= self.swipe_motion_center_threshold
-                )
-                or abs(center_vertical_shift)
-                >= (self.swipe_center_vertical_shift_threshold + 1.0)
-            )
-            and (
-                (
-                    icon_track_shift >= self.icon_track_shift_threshold
-                    and icon_track_response >= self.icon_track_min_response
-                )
-                or abs(vertical_shift) >= self.swipe_vertical_shift_threshold
-                or abs(center_vertical_shift) >= self.swipe_center_vertical_shift_threshold
-            )
-            and self._state.scroll_direction_frames >= 2
-        )
-        if swipe_motion:
-            self._state.is_in_transition = True
-            self._state.transition_started_from_black = False
-            self._state.transition_quiet_frames = 0
-            self._state.transition_frame_count = 0
-            self._state.transition_peak_motion_right = motion_right
-            self._state.transition_peak_motion_center = motion_center
-            self._state.transition_peak_icon_shift = icon_track_shift
-            self._state.transition_peak_vertical_shift = abs(vertical_shift)
-            self._state.transition_peak_center_vertical_shift = abs(center_vertical_shift)
+        if self._is_settled_frame(features):
+            self._state.consecutive_same_frames += 1
+        else:
             self._state.consecutive_same_frames = 0
-            self._state.pending_screenshot = None
+
+        if not self._first_frame_emitted:
+            return self._bootstrap_first_reel(frame_bgr, frame_index)
+
+        if self._state.mode == DetectorMode.COOLDOWN:
+            if frame_index >= self._state.cooldown_until_frame:
+                self._state.mode = DetectorMode.IDLE
+            else:
+                return ReelChangeType.NONE
+
+        if self._state.mode == DetectorMode.IDLE:
+            if (
+                not self._state.armed_for_transition
+                and self._state.consecutive_same_frames >= self.config.rearm_settle_frames
+            ):
+                self._state.armed_for_transition = True
+
+            if not self._state.armed_for_transition:
+                return ReelChangeType.NONE
+
+            audio_boost_active = frame_index <= self._audio_boost_until_frame
+            impulse_swipe_candidate = self._is_impulse_swipe_candidate(features)
+            boosted_swipe_candidate = (
+                audio_boost_active
+                and features.mean_abs_vy >= (self.config.trigger_mean_vy * 0.70)
+                and features.vertical_ratio >= (self.config.trigger_vertical_ratio * 0.70)
+                and features.coverage >= (self.config.trigger_coverage * 0.70)
+            )
+            weak_swipe_candidate = self._is_weak_swipe_candidate(features)
+
+            if self._is_swipe_candidate(features) or boosted_swipe_candidate:
+                self._state.trigger_streak += 1
+            else:
+                self._state.trigger_streak = 0
+
+            if weak_swipe_candidate:
+                self._state.weak_trigger_streak += 1
+            else:
+                self._state.weak_trigger_streak = 0
+
+            if impulse_swipe_candidate or (
+                self._state.trigger_streak >= self.config.trigger_consecutive_frames
+                or self._state.weak_trigger_streak >= self.config.weak_trigger_consecutive_frames
+            ):
+                self._state.mode = DetectorMode.TRANSITION
+                self._state.is_in_transition = True
+                self._state.transition_started_at_frame = frame_index
+                self._state.settle_streak = 0
+                self._state.weak_trigger_streak = 0
+                self._state.transition_cumulative_vy = 0.0
+                reason = "impulse" if impulse_swipe_candidate else "streak"
+                logger.info("transition_start frame=%d reason=%s", frame_index, reason)
+                return ReelChangeType.TRANSITION
+
+            return ReelChangeType.NONE
+
+        if self._state.mode == DetectorMode.TRANSITION:
+            elapsed_frames = frame_index - self._state.transition_started_at_frame
+            min_transition_frames = self._ms_to_frames(self.config.min_transition_ms)
+            max_transition_frames = self._ms_to_frames(self.config.max_transition_ms)
+            self._state.transition_cumulative_vy += features.median_vy
+
+            if elapsed_frames > max_transition_frames:
+                # Recovery path: if motion is already near settled, move to settling
+                # instead of dropping the transition outright.
+                if features.mean_mag <= (self._effective_settle_threshold() * 1.15):
+                    self._state.mode = DetectorMode.SETTLING
+                    self._state.is_in_transition = False
+                    self._state.settle_streak = 1
+                    return ReelChangeType.TRANSITION
+
+                logger.info(
+                    "transition_reset reason=timeout elapsed_frames=%d max_frames=%d",
+                    elapsed_frames,
+                    max_transition_frames,
+                )
+                self._state.mode = DetectorMode.IDLE
+                self._state.is_in_transition = False
+                self._state.trigger_streak = 0
+                self._state.weak_trigger_streak = 0
+                self._state.settle_streak = 0
+                self._state.transition_cumulative_vy = 0.0
+                return ReelChangeType.NONE
+
+            if elapsed_frames >= min_transition_frames and self._is_settled_frame(features):
+                self._state.mode = DetectorMode.SETTLING
+                self._state.is_in_transition = False
+                self._state.settle_streak = 1
+                return ReelChangeType.TRANSITION
+
             return ReelChangeType.TRANSITION
 
-        # No transition and no confirmed swipe completion.
-        # Stable in-reel browsing: no transition, no new reel.
-        self._state.consecutive_same_frames += 1
+        if self._state.mode == DetectorMode.SETTLING:
+            required_settle_frames = self.config.settle_consecutive_frames
+            if frame_index <= self._audio_boost_until_frame:
+                required_settle_frames = max(3, required_settle_frames - 2)
+
+            if self._is_settled_frame(features):
+                self._state.settle_streak += 1
+            else:
+                # If strong vertical motion returns, transition resumed.
+                if self._is_swipe_candidate(features):
+                    self._state.mode = DetectorMode.TRANSITION
+                    self._state.is_in_transition = True
+                    self._state.transition_started_at_frame = frame_index
+                    self._state.settle_streak = 0
+                    logger.info("transition_resume frame=%d", frame_index)
+                    return ReelChangeType.TRANSITION
+                self._state.settle_streak = max(0, self._state.settle_streak - 1)
+                return ReelChangeType.NONE
+
+            if self._state.settle_streak >= required_settle_frames:
+                displacement = abs(self._state.transition_cumulative_vy)
+                if displacement < self.config.min_transition_displacement_px:
+                    logger.info(
+                        "reel_rejected reason=low_displacement displacement=%.2f min=%.2f",
+                        displacement,
+                        self.config.min_transition_displacement_px,
+                    )
+                    self._state.mode = DetectorMode.IDLE
+                    self._state.trigger_streak = 0
+                    self._state.weak_trigger_streak = 0
+                    self._state.settle_streak = 0
+                    self._state.transition_cumulative_vy = 0.0
+                    return ReelChangeType.NONE
+
+                logger.info(
+                    "settle_achieved frame=%d displacement=%.2f",
+                    frame_index,
+                    displacement,
+                )
+                return self._confirm_new_reel(frame_index)
+
+            return ReelChangeType.NONE
+
+        # Defensive fallback.
+        self._state.mode = DetectorMode.IDLE
+        self._state.is_in_transition = False
         return ReelChangeType.NONE
 
     def is_stable(self) -> bool:
-        """Check if current content appears stable (not scrolling).
-
-        Returns:
-            True if content has been stable for required frames.
-        """
+        """Check if current content appears stable (not scrolling)."""
         return self._state.consecutive_same_frames >= self.stable_frames
 
     def get_stable_screenshot(self) -> Image.Image | None:
-        """Get screenshot of stable content.
-
-        Returns:
-            Screenshot if content is stable, None otherwise.
-        """
+        """Get screenshot of stable content."""
         if self.is_stable():
             return self._state.last_screenshot
         return None
@@ -665,14 +812,7 @@ class ReelSession:
         self.is_active = False
 
     def process_frame(self, frame: Image.Image) -> tuple[ReelChangeType, int]:
-        """Process frame and return change type and current reel number.
-
-        Args:
-            frame: Screenshot frame to process.
-
-        Returns:
-            Tuple of (change_type, current_reel_number).
-        """
+        """Process frame and return change type and current reel number."""
         if not self.is_active:
             return ReelChangeType.NONE, 0
 

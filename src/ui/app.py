@@ -229,6 +229,11 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
             on_stop_session=on_stop_session,
         )
 
+    # Legacy dashboard UI (live session + receipt printer) exposed at /admin
+    @ui.page("/admin")
+    def admin():
+        create_dashboard()
+
     # Run the app
     ui.run(
         host=host,

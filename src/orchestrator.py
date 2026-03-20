@@ -63,7 +63,13 @@ class Orchestrator:
         )
         self.reel_detector = ReelDetector(
             hash_threshold=config.hash_threshold,
+            transition_frames=config.reel_detector.trigger_consecutive_frames,
+            stable_frames=max(1, config.reel_detector.settle_consecutive_frames // 2),
+            detector_config=config.reel_detector,
+            output_dir=config.output_dir,
+            save_screenshots=config.save_screenshots,
         )
+        self.reel_detector.config.expected_fps = float(max(1, config.capture_fps))
         self.content_detector = ContentDetector(
             hash_threshold=config.hash_threshold,
         )

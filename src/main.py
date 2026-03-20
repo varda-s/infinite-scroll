@@ -69,8 +69,8 @@ Examples:
     parser.add_argument(
         "--fps",
         type=int,
-        default=20,
-        help="Capture frame rate (default: 20)",
+        default=30,
+        help="Capture frame rate (default: 30)",
     )
 
     # Detection settings

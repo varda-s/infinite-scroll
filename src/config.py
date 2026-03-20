@@ -4,18 +4,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from src.detection.reel_detector import ReelDetectorConfig
+
 
 @dataclass
 class Config:
     """Application configuration."""
 
     # Capture settings
-    capture_fps: int = 20
+    capture_fps: int = 30
     capture_timeout: float = 5.0  # Timeout for device operations
 
     # Detection settings
     hash_threshold: int = 15  # pHash difference threshold for new reel
     min_reel_duration: float = 0.5  # Ignore very short "reels" (scroll-through)
+    reel_detector: ReelDetectorConfig = field(default_factory=ReelDetectorConfig)
 
     # Instagram detection
     instagram_package: str = "com.instagram.android"  # Android package name
@@ -45,7 +48,7 @@ class Config:
         import os
 
         return cls(
-            capture_fps=int(os.getenv("CAPTURE_FPS", "20")),
+            capture_fps=int(os.getenv("CAPTURE_FPS", "30")),
             hash_threshold=int(os.getenv("HASH_THRESHOLD", "15")),
             min_reel_duration=float(os.getenv("MIN_REEL_DURATION", "0.5")),
             printer_type=os.getenv("PRINTER_TYPE", "mock"),  # type: ignore
