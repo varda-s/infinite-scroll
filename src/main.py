@@ -240,6 +240,14 @@ def list_printers() -> None:
         print("  macOS: system_profiler SPUSBDataType")
         print("  Linux: lsusb")
         print("\nThen use: --vendor-id 0xXXXX --product-id 0xYYYY")
+    except Exception as e:
+        print(f"USB scanning is unavailable on this machine: {e}")
+        print("This usually means libusb is not installed or not visible to pyusb.")
+        print("\nOn macOS with Homebrew:")
+        print("  brew install libusb")
+        print("\nThen restart the app from the project virtualenv and retry:")
+        print("  source venv/bin/activate")
+        print("  python -m src.main --list-printers")
 
 
 def create_capture(args: argparse.Namespace) -> BaseCapture:

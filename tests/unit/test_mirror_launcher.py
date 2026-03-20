@@ -1,6 +1,6 @@
 """Tests for uxplay launcher arguments."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 from src.capture.mirror_launcher import MirrorLauncher
 
@@ -11,8 +11,10 @@ def test_launch_uxplay_with_pin_uses_pin_flag() -> None:
     fake_proc.poll.return_value = None
 
     with patch.object(MirrorLauncher, "is_uxplay_available", return_value=True), \
+         patch("src.capture.mirror_launcher.log_connection_event"), \
          patch("src.capture.mirror_launcher.subprocess.run"), \
          patch("src.capture.mirror_launcher.subprocess.Popen", return_value=fake_proc) as popen, \
+         patch("builtins.open", mock_open()), \
          patch("src.capture.mirror_launcher.time.sleep"):
         proc, pin = MirrorLauncher.launch_uxplay_with_pin(pin="1234")
 
@@ -22,3 +24,5 @@ def test_launch_uxplay_with_pin_uses_pin_flag() -> None:
     assert "-pin" in args
     assert "1234" in args
     assert "-pw" not in args
+    assert "-fps" in args
+    assert "60" in args

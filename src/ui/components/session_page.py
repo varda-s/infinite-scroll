@@ -193,7 +193,7 @@ def create_session_page(
 
                 def update_printer_banner() -> None:
                     nonlocal last_printer_connected
-                    connected = check_rongta_connected()
+                    connected = app_state.printer_connected if app_state.session_active else check_rongta_connected()
                     if connected != last_printer_connected:
                         app_state.set_printer_connected(connected)
                         last_printer_connected = connected

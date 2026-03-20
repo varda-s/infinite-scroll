@@ -206,7 +206,7 @@ class MirrorLauncher:
         *,
         server_name: str = "ReelTracker",
         pin: Optional[str] = None,
-        fps: int = 120,
+        fps: int = 60,
     ) -> tuple[Optional[subprocess.Popen], Optional[str]]:
         """Launch uxplay with a PIN requirement.
 

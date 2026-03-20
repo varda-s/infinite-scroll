@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from unittest.mock import patch
 
+from src.printing.escpos_printer import ESCPOSPrinter
 from src.capture.base import BaseCapture, DeviceInfo, DeviceType, ForegroundApp
 from src.ui.services.tracking_service import TrackingService
 from src.ui.state import app_state, LiveReelReceipt
@@ -195,3 +196,21 @@ def test_live_progress_ignored_when_callbacks_disabled() -> None:
 
     assert app_state.current_reel_number == before_reel
     assert app_state.current_reel_duration == before_duration
+
+
+def test_can_connect_matches_constructor_probe_without_open() -> None:
+    """USB detection should succeed when Usb construction works."""
+    closed = []
+
+    class _FakeUsb:
+        def __init__(self, vendor_id: int, product_id: int) -> None:
+            self.vendor_id = vendor_id
+            self.product_id = product_id
+
+        def close(self) -> None:
+            closed.append((self.vendor_id, self.product_id))
+
+    with patch("escpos.printer.Usb", _FakeUsb):
+        assert ESCPOSPrinter.can_connect() is True
+
+    assert closed == [ESCPOSPrinter.RONGTA_USB_IDS[0]]

@@ -85,6 +85,7 @@ class Orchestrator:
         self._session_active = False  # True when user is in Reels mode
         self._capture_failure_count = 0
         self._max_capture_failures = 0
+        self._manual_capture_failure_grace = 0
 
     def _on_reel_complete(self, session: ReelSession) -> None:
         """Handle completed reel viewing.
@@ -212,6 +213,10 @@ class Orchestrator:
         frame_interval = 1.0 / self.config.capture_fps
         # Treat a sustained run of failed captures as mirror disconnect.
         self._max_capture_failures = max(6, int(self.config.capture_fps * 1.5))
+        self._manual_capture_failure_grace = max(
+            self._max_capture_failures,
+            int(self.config.capture_fps * 10),
+        )
 
         print(f"\nMonitoring at {self.config.capture_fps} FPS")
         if self.manual_session_start:
@@ -249,7 +254,7 @@ class Orchestrator:
                     self._process_frame(frame)
             else:
                 self._capture_failure_count += 1
-                if self._capture_failure_count >= self._max_capture_failures:
+                if self._capture_failure_count >= self._manual_capture_failure_grace:
                     self._handle_capture_disconnect()
                     break
 

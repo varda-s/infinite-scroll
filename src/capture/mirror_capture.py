@@ -599,6 +599,8 @@ class MirrorCapture(BaseCapture):
         self._connected = False
         self._static_frame_streak = 0
         self._prev_small_hash: Optional[str] = None
+        self._stream_inactive_streak = 0
+        self._max_inactive_checks = 45
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -634,6 +636,7 @@ class MirrorCapture(BaseCapture):
         self._connected = True
         self._static_frame_streak = 0
         self._prev_small_hash = None
+        self._stream_inactive_streak = 0
         return True
 
     def disconnect(self) -> None:
@@ -643,6 +646,7 @@ class MirrorCapture(BaseCapture):
         self._device_info = None
         self._static_frame_streak = 0
         self._prev_small_hash = None
+        self._stream_inactive_streak = 0
 
     def _capture_with_quartz(self) -> Optional[Image.Image]:
         """Capture mirror window with Quartz APIs (faster than screencapture)."""
@@ -683,10 +687,14 @@ class MirrorCapture(BaseCapture):
         if not self._connected or self._mirror_source is None:
             return None
 
-        # Guard against stale sessions: if the AirPlay stream is gone, fail fast
-        # so orchestrator can stop the session instead of processing frozen frames.
+        # Guard against stale sessions, but debounce aggressively.
+        # Dark/low-contrast reels and short uxplay hiccups must not end a gallery session.
         if not MirrorDetector.is_stream_active(self._mirror_source):
-            return None
+            self._stream_inactive_streak += 1
+            if self._stream_inactive_streak >= self._max_inactive_checks:
+                return None
+        else:
+            self._stream_inactive_streak = 0
 
         try:
             if self._mirror_source.window_id <= 0:
@@ -705,6 +713,7 @@ class MirrorCapture(BaseCapture):
                 # If Quartz feed appears frozen while stream is active, try
                 # screencapture fallback to recover updates from background windows.
                 if self._static_frame_streak < 10:
+                    self._stream_inactive_streak = 0
                     return image
 
             import tempfile
@@ -747,6 +756,7 @@ class MirrorCapture(BaseCapture):
             else:
                 self._static_frame_streak = 0
             self._prev_small_hash = small_hash
+            self._stream_inactive_streak = 0
             return image
 
         except Exception:

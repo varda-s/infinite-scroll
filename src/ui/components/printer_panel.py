@@ -1,8 +1,29 @@
 """Printer selection panel component."""
 
+import time
+
 from nicegui import ui
 
+from src.printing.escpos_printer import ESCPOSPrinter
 from src.ui.state import app_state
+
+_PRINTER_STATUS_CACHE_SECONDS = 2.0
+_last_probe_at = 0.0
+_last_probe_result = False
+
+
+def _scan_known_rongta_usb_ids() -> bool:
+    """Check known Rongta USB IDs without opening/configuring the device."""
+    try:
+        import usb.core
+
+        for vendor_id, product_id in ESCPOSPrinter.RONGTA_USB_IDS:
+            if usb.core.find(idVendor=vendor_id, idProduct=product_id) is not None:
+                return True
+    except Exception:
+        pass
+
+    return False
 
 
 def check_rongta_connected() -> bool:
@@ -11,52 +32,18 @@ def check_rongta_connected() -> bool:
     Returns:
         True if a Rongta printer is detected.
     """
-    # Known tested/compatible ESC-POS USB ID pairs.
-    known_usb_ids = [
-        (0x0FE6, 0x811E),  # Legacy tested booth printer
-        (0x0483, 0x5743),  # RP58
-        (0x0483, 0x5740),  # RP80
-        (0x0483, 0x5720),  # Generic
-        (0x6868, 0x0500),  # ACE V1
-        (0x6868, 0x0200),  # Alternative
-        (0x0416, 0x5011),  # Some Rongta models
-        (0x0483, 0x070B),  # RP328
-    ]
+    global _last_probe_at, _last_probe_result
 
-    # Fast path: USB device scan.
-    try:
-        import usb.core
+    if app_state.session_active:
+        return app_state.printer_connected
 
-        for vendor_id, product_id in known_usb_ids:
-            device = usb.core.find(idVendor=vendor_id, idProduct=product_id)
-            if device is not None:
-                return True
-    except Exception:
-        pass
+    now = time.monotonic()
+    if now - _last_probe_at < _PRINTER_STATUS_CACHE_SECONDS:
+        return _last_probe_result
 
-    # Fallback path: force a real ESC/POS USB open probe.
-    # Note: constructing Usb(...) alone is lazy and can return without hardware.
-    try:
-        from escpos.printer import Usb
-
-        for vendor_id, product_id in known_usb_ids:
-            printer = None
-            try:
-                printer = Usb(vendor_id, product_id)
-                printer.open()  # Force backend/device handle resolution.
-                return True
-            except Exception:
-                continue
-            finally:
-                try:
-                    if printer is not None:
-                        printer.close()
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return False
+    _last_probe_result = _scan_known_rongta_usb_ids()
+    _last_probe_at = now
+    return _last_probe_result
 
 
 def create_printer_panel(

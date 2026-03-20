@@ -53,31 +53,44 @@ class ReelDetectorConfig:
     roi_x2: float = 0.85
     roi_y2: float = 0.85
 
+    # UI regions that tend to change between reels while center video content can
+    # animate independently. These are used for final reel confirmation hashes.
+    ui_right_x1: float = 0.76
+    ui_right_y1: float = 0.14
+    ui_right_x2: float = 0.98
+    ui_right_y2: float = 0.90
+    ui_bottom_x1: float = 0.04
+    ui_bottom_y1: float = 0.70
+    ui_bottom_x2: float = 0.96
+    ui_bottom_y2: float = 0.96
+
     motion_mag_thresh: float = 1.0
     trigger_mean_vy: float = 0.85
     trigger_vertical_ratio: float = 1.45
-    trigger_coverage: float = 0.20
+    trigger_coverage: float = 0.24
     trigger_consistency: float = 0.55
     trigger_consecutive_frames: int = 2
-    weak_trigger_consecutive_frames: int = 4
+    weak_trigger_consecutive_frames: int = 6
     impulse_trigger_mean_vy: float = 1.75
     impulse_trigger_vertical_ratio: float = 1.15
     impulse_trigger_coverage: float = 0.28
     impulse_trigger_consistency: float = 0.45
-    min_transition_displacement_px: float = 8.0
+    min_transition_displacement_px: float = 10.0
     rearm_settle_frames: int = 3
 
     settle_mean_mag: float = 3.0
-    settle_consecutive_frames: int = 6
+    settle_consecutive_frames: int = 7
     auto_calibrate_settle: bool = True
     settle_multiplier: float = 1.20
     settle_history_size: int = 180
 
     min_transition_ms: int = 80
     max_transition_ms: int = 1200
-    cooldown_ms: int = 450
+    cooldown_ms: int = 900
+    min_confirmed_gap_ms: int = 900
 
     phash_hamming_min_new_reel: int = 10
+    ui_phash_hamming_min_new_reel: int = 6
 
     ring_buffer_size: int = 120
 
@@ -150,6 +163,7 @@ class ReelState:
     motion_floor_ema: float = 0.0
     transition_cumulative_vy: float = 0.0
     armed_for_transition: bool = True
+    last_confirmed_frame: int = 0
 
 
 class AsyncScreenshotSaver:
@@ -242,6 +256,7 @@ class ReelDetector:
         self._idle_motion_history: deque[float] = deque(maxlen=self.config.settle_history_size)
         self._saved_reel_count = 0
         self._last_saved_phash: str | None = None
+        self._last_saved_ui_hash: str | None = None
         self._first_frame_emitted = False
         self._audio_boost_until_frame: int = 0
 
@@ -271,6 +286,7 @@ class ReelDetector:
         self._idle_motion_history.clear()
         self._saved_reel_count = 0
         self._last_saved_phash = None
+        self._last_saved_ui_hash = None
         self._first_frame_emitted = False
         self._audio_boost_until_frame = 0
 
@@ -424,6 +440,41 @@ class ReelDetector:
         pil = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         return f"ih:{str(compute_phash(pil, hash_size=8))}"
 
+    def _extract_confirmation_regions(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Build a composite image from UI regions that identify a reel."""
+        h, w = frame_bgr.shape[:2]
+
+        def crop(x1: float, y1: float, x2: float, y2: float) -> np.ndarray:
+            px1 = max(0, min(int(w * x1), w - 1))
+            py1 = max(0, min(int(h * y1), h - 1))
+            px2 = max(px1 + 1, min(int(w * x2), w))
+            py2 = max(py1 + 1, min(int(h * y2), h))
+            return frame_bgr[py1:py2, px1:px2]
+
+        right = crop(
+            self.config.ui_right_x1,
+            self.config.ui_right_y1,
+            self.config.ui_right_x2,
+            self.config.ui_right_y2,
+        )
+        bottom = crop(
+            self.config.ui_bottom_x1,
+            self.config.ui_bottom_y1,
+            self.config.ui_bottom_x2,
+            self.config.ui_bottom_y2,
+        )
+
+        right_resized = cv2.resize(right, (128, 416), interpolation=cv2.INTER_AREA)
+        bottom_resized = cv2.resize(bottom, (384, 128), interpolation=cv2.INTER_AREA)
+        canvas = np.full((544, 384, 3), 255, dtype=np.uint8)
+        canvas[:416, :128] = right_resized
+        canvas[416:, :] = bottom_resized
+        return canvas
+
+    def _compute_confirmation_hash(self, frame_bgr: np.ndarray) -> str:
+        """Hash only the reel-identifying UI regions."""
+        return self._compute_frame_phash(self._extract_confirmation_regions(frame_bgr))
+
     def _phash_distance(self, h1: str | None, h2: str | None) -> int:
         if h1 is None or h2 is None:
             return 10_000
@@ -522,6 +573,19 @@ class ReelDetector:
         return path
 
     def _confirm_new_reel(self, frame_index: int) -> ReelChangeType:
+        min_gap_frames = self._ms_to_frames(self.config.min_confirmed_gap_ms)
+        if (
+            self._state.last_confirmed_frame > 0
+            and (frame_index - self._state.last_confirmed_frame) < min_gap_frames
+        ):
+            logger.info(
+                "reel_rejected reason=confirmed_gap gap_frames=%d min_gap_frames=%d",
+                frame_index - self._state.last_confirmed_frame,
+                min_gap_frames,
+            )
+            self._enter_cooldown(frame_index)
+            return ReelChangeType.NONE
+
         best = self._select_best_frame()
         if best is None:
             logger.info("reel_rejected reason=no_buffered_frame")
@@ -530,6 +594,8 @@ class ReelDetector:
 
         candidate_hash = self._compute_frame_phash(best.frame_bgr)
         hash_distance = self._phash_distance(candidate_hash, self._last_saved_phash)
+        candidate_ui_hash = self._compute_confirmation_hash(best.frame_bgr)
+        ui_hash_distance = self._phash_distance(candidate_ui_hash, self._last_saved_ui_hash)
 
         if self._last_saved_phash is not None and hash_distance < self.config.phash_hamming_min_new_reel:
             logger.info(
@@ -540,9 +606,26 @@ class ReelDetector:
             self._enter_cooldown(frame_index)
             return ReelChangeType.NONE
 
+        displacement = abs(self._state.transition_cumulative_vy)
+        if (
+            self._last_saved_ui_hash is not None
+            and ui_hash_distance < self.config.ui_phash_hamming_min_new_reel
+            and displacement < (self.config.min_transition_displacement_px * 1.8)
+        ):
+            logger.info(
+                "reel_rejected reason=ui_duplicate ui_distance=%d ui_threshold=%d displacement=%.2f",
+                ui_hash_distance,
+                self.config.ui_phash_hamming_min_new_reel,
+                displacement,
+            )
+            self._enter_cooldown(frame_index)
+            return ReelChangeType.NONE
+
         self._state.previous_hash = self._state.current_hash
         self._state.current_hash = candidate_hash
         self._last_saved_phash = candidate_hash
+        self._last_saved_ui_hash = candidate_ui_hash
+        self._state.last_confirmed_frame = frame_index
 
         screenshot_rgb = cv2.cvtColor(best.frame_bgr, cv2.COLOR_BGR2RGB)
         screenshot = Image.fromarray(screenshot_rgb)
@@ -591,6 +674,8 @@ class ReelDetector:
         first_hash = self._compute_frame_phash(frame_bgr)
         self._state.current_hash = first_hash
         self._last_saved_phash = first_hash
+        self._last_saved_ui_hash = self._compute_confirmation_hash(frame_bgr)
+        self._state.last_confirmed_frame = frame_index
 
         screenshot_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         screenshot = Image.fromarray(screenshot_rgb)

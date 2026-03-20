@@ -57,6 +57,42 @@ class ESCPOSPrinter(BasePrinter):
         (0x0483, 0x070B),  # RP328
     ]
 
+    @staticmethod
+    def _ensure_usb_device_ready(printer: object) -> None:
+        """Force lazy USB printers to resolve a real device handle."""
+        try:
+            device = getattr(printer, "device")
+        except Exception as e:
+            raise RuntimeError(f"USB backend unavailable: {e}") from e
+
+        if device is None:
+            raise RuntimeError("USB printer handle was not created")
+
+    @classmethod
+    def can_connect(cls) -> bool:
+        """Return True when a supported Rongta printer is reachable."""
+        try:
+            from escpos.printer import Usb
+
+            for vid, pid in cls.RONGTA_USB_IDS:
+                printer = None
+                try:
+                    printer = Usb(vid, pid)
+                    cls._ensure_usb_device_ready(printer)
+                    return True
+                except Exception:
+                    continue
+                finally:
+                    try:
+                        if printer is not None:
+                            printer.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return False
+
     def __init__(
         self,
         device_path: str | None = None,
@@ -101,6 +137,8 @@ class ESCPOSPrinter(BasePrinter):
             # Try USB connection with specific IDs
             if self.vendor_id and self.product_id:
                 self._printer = Usb(self.vendor_id, self.product_id)
+                self._ensure_usb_device_ready(self._printer)
+                self._configure_profile_width()
                 self._reset_printer()
                 return
 
@@ -109,6 +147,8 @@ class ESCPOSPrinter(BasePrinter):
                 for vid, pid in self.RONGTA_USB_IDS:
                     try:
                         self._printer = Usb(vid, pid)
+                        self._ensure_usb_device_ready(self._printer)
+                        self._configure_profile_width()
                         print(f"Found Rongta printer: VID=0x{vid:04X}, PID=0x{pid:04X}")
                         self._reset_printer()
                         return
@@ -118,6 +158,7 @@ class ESCPOSPrinter(BasePrinter):
             # Fall back to file/device path
             if self.device_path:
                 self._printer = File(self.device_path)
+                self._configure_profile_width()
                 self._reset_printer()
             else:
                 raise RuntimeError(
@@ -126,6 +167,17 @@ class ESCPOSPrinter(BasePrinter):
 
         except Exception as e:
             raise RuntimeError(f"Failed to connect to printer: {e}") from e
+
+    def _configure_profile_width(self) -> None:
+        """Populate profile width so python-escpos image logging stays quiet."""
+        if not self._printer:
+            return
+        try:
+            media = self._printer.profile.profile_data.setdefault("media", {})
+            width = media.setdefault("width", {})
+            width["pixels"] = str(int(self.printer_width))
+        except Exception:
+            pass
 
     @classmethod
     def find_usb_printers(cls) -> list[tuple[int, int, str]]:

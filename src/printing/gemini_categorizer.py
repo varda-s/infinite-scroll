@@ -24,7 +24,6 @@ REEL_LABEL_POOL = [
     "watching water evaporate",
     "not touching grass",
     "working hard at the data factory",
-    "on a break after sending one email",
     "numbing my inner voice",
     "earned this break (not really)",
     "just one more (x27)",
@@ -32,7 +31,6 @@ REEL_LABEL_POOL = [
     "avoiding one specific thought",
     "anxiety feedback loop",
     "microdosing dopamine",
-    "feeling something but not naming it",
     "outsourced self-knowledge",
     "outside? never heard of her",
     "lost to the void",
@@ -46,7 +44,6 @@ REEL_LABEL_POOL = [
     "warming up to begin task",
     "thumb endurance training",
     "drinking zero water",
-    "sitting still in the same position",
     "chronically online",
     "training the algorithm for free",
     "engagement farming (as the crop)",
@@ -60,8 +57,7 @@ REEL_LABEL_POOL = [
     "visual caffeine",
     "aggressive life auditing",
     "voluntary brain smoothening",
-    "fracturing attention span",
-    "parasocial relationship building",
+    "fracturing attention span"
 ]
 
 _GEMINI_OPT_IN_ENV_VAR = "REEL_CATEGORIZER_BACKEND"

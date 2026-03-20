@@ -174,7 +174,8 @@ def build_summary_lines(entries: Iterable[ReelReceiptEntry], line_width: int = L
         by_topic[entry.topic] += entry.duration_seconds
     max_topic, max_s = max(by_topic.items(), key=lambda kv: kv[1]) if by_topic else ("Unknown", 0.0)
     pct = (max_s / total_s * 100.0) if total_s else 0.0
-    max_topic = _truncate_plain(max_topic, 20)
+    # do not truncate let it be
+    # max_topic = _truncate_plain(max_topic, 20)
     peak_line = f"Peak fixation: {max_topic} - {max_s:.2f}s ({pct:.1f}%)"
     if len(peak_line) <= line_width:
         lines.append(peak_line)

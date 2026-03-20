@@ -412,6 +412,78 @@ class TestOrchestratorIntegration:
         content = printer.get_receipt_content()
         assert "REEL RECEIPT" in content
 
+    def test_manual_session_tolerates_transient_capture_dropouts(
+        self, temp_dir: Path
+    ) -> None:
+        """Manual booth sessions should survive brief mirror dropouts."""
+
+        class FlakyManualMirrorCapture(BaseCapture):
+            def __init__(self) -> None:
+                self._connected = False
+                self._calls = 0
+                self._device_info = DeviceInfo(
+                    device_type=DeviceType.IOS,
+                    device_id="mirror:transient",
+                    device_name="Transient Mirror",
+                    model="uxplay",
+                    connection_type="mirror",
+                )
+
+            @property
+            def device_info(self) -> DeviceInfo:
+                return self._device_info
+
+            @property
+            def is_connected(self) -> bool:
+                return self._connected
+
+            def connect(self) -> bool:
+                self._connected = True
+                return True
+
+            def disconnect(self) -> None:
+                self._connected = False
+
+            def capture_screen(self) -> Image.Image | None:
+                if not self._connected:
+                    return None
+                self._calls += 1
+                # Simulate a short mirror hiccup mid-session.
+                if 12 <= self._calls <= 35:
+                    return None
+                arr = np.random.randint(0, 255, (1920, 1080, 3), dtype=np.uint8)
+                return Image.fromarray(arr)
+
+            def get_foreground_app(self) -> ForegroundApp | None:
+                return ForegroundApp(package_name="com.instagram.android", activity="reels")
+
+        config = Config(
+            output_dir=temp_dir,
+            capture_fps=30,
+            min_reel_duration=0,
+            hash_threshold=6,
+        )
+        capture = FlakyManualMirrorCapture()
+        printer = MockPrinter(output_dir=temp_dir, verbose=False)
+        orchestrator = Orchestrator(
+            capture=capture,
+            printer=printer,
+            config=config,
+            use_content_detection=False,
+            manual_session_start=True,
+        )
+
+        thread = threading.Thread(target=orchestrator.run)
+        thread.start()
+        time.sleep(1.5)
+
+        # Brief capture dropouts should not tear down the whole manual session.
+        assert thread.is_alive()
+
+        orchestrator.stop()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
     def test_reel_number_advances_from_current_reel_not_completed_count(
         self, temp_dir: Path, varying_images_dir: Path
     ) -> None:
