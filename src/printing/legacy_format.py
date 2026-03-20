@@ -36,6 +36,10 @@ REEL_TOPICS = [
     "Pet Video",
 ]
 
+_OLD_REEL_ITEM_PATTERN = re.compile(r"^Reel\s+(\d+)\s+\[(.*?)\]")
+_NEW_REEL_ITEM_PATTERN = re.compile(r"^\[(.*?)\]\.+\$\d")
+_PLAIN_REEL_ITEM_PATTERN = re.compile(r"^(.+?)\.+\$\d")
+
 
 @dataclass
 class ReelReceiptEntry:
@@ -155,7 +159,7 @@ def build_summary_lines(entries: Iterable[ReelReceiptEntry], line_width: int = L
     lines = ["REEL RECEIPT", "=" * line_width]
     for entry in items:
         right = f"${entry.duration_seconds:,.2f}"
-        left = f"Reel {entry.reel_number} [{entry.topic}]"
+        left = entry.topic
         lines.append(_fit_item_line(left, right, width=line_width))
 
     lines.append("=" * line_width)
@@ -206,7 +210,13 @@ def _wrap_non_item_lines(lines: list[str], width: int) -> list[str]:
         if len(line) <= width:
             wrapped.append(line)
             continue
-        if line.startswith("Reel ") and "$" in line:
+        if _OLD_REEL_ITEM_PATTERN.match(line) and "$" in line:
+            wrapped.append(line[:width])
+            continue
+        if _NEW_REEL_ITEM_PATTERN.match(line):
+            wrapped.append(line[:width])
+            continue
+        if _PLAIN_REEL_ITEM_PATTERN.match(line) and not line.startswith("TOTAL"):
             wrapped.append(line[:width])
             continue
         if line.startswith("TOTAL"):
@@ -226,19 +236,40 @@ def _wrap_non_item_lines(lines: list[str], width: int) -> list[str]:
 
 
 def parse_topics_from_receipt_content(receipt_content: str | None) -> dict[int, str]:
-    """Parse `Reel N [Topic]....$x` lines from stored summary receipt text."""
+    """Parse old/new summary item lines from stored receipt text."""
     if not receipt_content:
         return {}
     parsed: dict[int, str] = {}
-    pattern = re.compile(r"^Reel\s+(\d+)\s+\[(.*?)\]")
     for raw_line in receipt_content.splitlines():
         line = raw_line.strip()
-        match = pattern.match(line)
-        if not match:
+        old_match = _OLD_REEL_ITEM_PATTERN.match(line)
+        if old_match:
+            reel_number = int(old_match.group(1))
+            topic = old_match.group(2).strip() or "Unknown"
+            parsed[reel_number] = topic
             continue
-        reel_number = int(match.group(1))
-        topic = match.group(2).strip() or "Unknown"
-        parsed[reel_number] = topic
+
+        if not _NEW_REEL_ITEM_PATTERN.match(line):
+            continue
+
+        topic_match = re.match(r"^\[(.*?)\]", line)
+        if not topic_match:
+            continue
+        topic = topic_match.group(1).strip() or "Unknown"
+        parsed[len(parsed) + 1] = topic
+
+    for raw_line in receipt_content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("TOTAL"):
+            continue
+        if _OLD_REEL_ITEM_PATTERN.match(line) or _NEW_REEL_ITEM_PATTERN.match(line):
+            continue
+
+        plain_match = _PLAIN_REEL_ITEM_PATTERN.match(line)
+        if not plain_match:
+            continue
+        topic = plain_match.group(1).strip() or "Unknown"
+        parsed[len(parsed) + 1] = topic
     return parsed
 
 

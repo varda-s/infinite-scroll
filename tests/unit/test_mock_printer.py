@@ -1,5 +1,6 @@
 """Tests for mock printer."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -114,8 +115,7 @@ class TestMockPrinter:
         assert "Time Spent: 10.50s" in content
         assert "Time Spent: 5.20s" in content
         assert "REEL RECEIPT" in content
-        assert "Reel 1 [" in content
-        assert "Reel 2 [" in content
+        assert re.search(r"^(?!TOTAL\b)[^\[\]\n].+\.+\$\d", content, flags=re.MULTILINE)
         assert "TOTAL" in content
         assert "Peak fixation" in content
         assert "✂" in content  # Cut

@@ -269,7 +269,10 @@ class TestOrchestratorIntegration:
         assert "Started:" in content
         assert "Time Spent:" in content
         assert "REEL RECEIPT" in content
-        assert "Reel 1 [" in content
+        assert any(
+            ("$" in line and "." in line and not line.startswith("TOTAL") and not line.startswith("["))
+            for line in content.splitlines()
+        )
         assert "TOTAL" in content
         assert "Peak fixation" in content
 

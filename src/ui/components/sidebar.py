@@ -46,6 +46,14 @@ def create_sidebar() -> ui.left_drawer:
                     ui.icon("history").classes("text-xl text-gray-300")
                     ui.label("Session History").classes("text-gray-200")
 
+            # Admin Settings
+            with ui.link(target="/admin/settings").classes("w-full no-underline"):
+                with ui.row().classes(
+                    "w-full items-center gap-3 p-3 rounded hover:bg-gray-700 cursor-pointer"
+                ):
+                    ui.icon("settings").classes("text-xl text-gray-300")
+                    ui.label("Admin Settings").classes("text-gray-200")
+
         # Spacer
         ui.element("div").classes("flex-grow")
 

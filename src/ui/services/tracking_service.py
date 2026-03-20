@@ -14,6 +14,7 @@ from src.capture.device_detector import DeviceDetector
 from src.capture.mock_capture import MockCapture
 from src.capture.mirror_capture import MirrorCapture, MirrorDetector
 from src.config import Config
+from src.detection.reel_detector import ReelDetectorConfig
 from src.detection.image_utils import compute_phash, extract_center_region
 from src.orchestrator import Orchestrator
 from src.printing.base import BasePrinter
@@ -234,6 +235,19 @@ class TrackingService:
         if not isinstance(configured_fps, int) or configured_fps < 15:
             configured_fps = 20
 
+        transition_frames = get_setting("transition_frames", 3)
+        if not isinstance(transition_frames, int) or transition_frames < 1:
+            transition_frames = 3
+
+        stable_frames = get_setting("stable_frames", 2)
+        if not isinstance(stable_frames, int) or stable_frames < 1:
+            stable_frames = 2
+
+        detector_config = ReelDetectorConfig(
+            trigger_consecutive_frames=transition_frames,
+            settle_consecutive_frames=max(2, stable_frames * 2),
+        )
+
         return Config(
             capture_fps=configured_fps,
             capture_timeout=get_setting("capture_timeout", 5.0),
@@ -241,6 +255,7 @@ class TrackingService:
             min_reel_duration=get_setting("min_reel_duration", 0.5),
             printer_width=get_setting("printer_width", 384),
             save_screenshots=get_setting("save_screenshots", True),
+            reel_detector=detector_config,
         )
 
     def _create_capture(self, device: DeviceInfo) -> Optional[BaseCapture]:
