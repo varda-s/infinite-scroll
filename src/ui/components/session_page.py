@@ -93,15 +93,16 @@ def create_session_page(
 
                 with ui.row().classes("w-full gap-6 items-start flex-wrap"):
                     with ui.column().classes("flex-1 min-w-64 max-w-lg gap-3"):
-                        ui.label("To participate in this experience, you will need an iPhone and Instagram.").classes(
+                        ui.label("To experience this exhibit, you will need an iPhone with Hotspot, and Instagram. None of your data is collected.").classes(
                             "setup-copy text-zinc-900"
                         )
                         ui.label("SETUP INSTRUCTIONS").classes("text-2xl font-semibold tracking-wide")
                         ui.label(
-                            "1. Connect your phone to tiat-guest (password: artandtechnology).\n"
-                            "2. Turn on Bluetooth. Open your iPhone's Control Center and tap Screen Mirroring.\n"
-                            "3. Select \"ReelTracker\" and enter the PIN shown on screen.\n"
-                            "4. Your phone screen should now be mirrored on the laptop."
+                            "1. Turn on your Personal Hotspot and Bluetooth in Settings."
+                            "2. Connect this laptop to your Personal Hotspot using the WiFi settings.\n"
+                            "3. Open your iPhone's Control Center and tap Screen Mirroring. You may need to add the Screen Mirroring control if it is not already in your Control Center.\n"
+                            "4. Select \"ReelTracker\" and enter the PIN shown on screen.\n"
+                            "5. Your phone screen should now be mirrored on the laptop."
                         ).classes("whitespace-pre-wrap setup-copy text-zinc-800")
 
                     with ui.card().classes("devices-card w-full max-w-sm bg-white rounded-xl p-5 gap-3"):
@@ -159,10 +160,10 @@ def create_session_page(
                 ui.label("Ready to start scrolling?").classes("text-4xl font-extrabold")
                 ui.label(
                     "1. Take a seat.\n\n"
-                    "2. Once your phone is connected and your screen is mirrored on the laptop, open Instagram.\n\n"
+                    "2. Once your phone is connected and you see that your phone screen is mirrored on the laptop, open the Instagram app.\n\n"
                     "3. Click on the Reels tab and select a reel to begin.\n\n"
                     "4. Press Start Session, and then scroll as you normally would.\n\n"
-                    "5. Click Stop Session when you're done."
+                    "5. Click Stop Session when you're done and collect your receipt."
                 ).classes("text-2xl whitespace-pre-wrap leading-relaxed")
 
                 session_hint = ui.label("").classes("text-base text-zinc-300")
