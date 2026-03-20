@@ -93,12 +93,15 @@ class Orchestrator:
             session: Completed reel session.
         """
         if session.screenshot:
-            self.printer.print_reel(
-                screenshot=session.screenshot,
-                duration_seconds=session.duration,
-                reel_number=session.reel_number,
-                analysis_frames=session.analysis_frames,
-            )
+            try:
+                self.printer.print_reel(
+                    screenshot=session.screenshot,
+                    duration_seconds=session.duration,
+                    reel_number=session.reel_number,
+                    analysis_frames=session.analysis_frames,
+                )
+            except Exception as e:
+                print(f"Printer reel print failed; continuing session: {e}")
 
         if self.on_reel_change:
             self.on_reel_change(session)
@@ -342,7 +345,10 @@ class Orchestrator:
 
         # Print session header
         session_start_str = self._session_start.strftime("%Y-%m-%d %H:%M:%S")
-        self.printer.print_header(session_start_str)
+        try:
+            self.printer.print_header(session_start_str)
+        except Exception as e:
+            print(f"Printer header print failed; continuing session: {e}")
 
         # Start time tracking
         self.time_tracker.start_session()
@@ -377,11 +383,18 @@ class Orchestrator:
         stats = self.time_tracker.stop_session()
 
         # Print summary with thank you
-        self.printer.print_summary(
-            total_reels=stats.total_reels,
-            total_time_seconds=stats.total_time,
-        )
-        self.printer.cut()
+        try:
+            self.printer.print_summary(
+                total_reels=stats.total_reels,
+                total_time_seconds=stats.total_time,
+            )
+        except Exception as e:
+            print(f"Printer summary print failed; continuing shutdown: {e}")
+
+        try:
+            self.printer.cut()
+        except Exception as e:
+            print(f"Printer cut failed; continuing shutdown: {e}")
 
         # Get receipt content if available
         receipt_content = ""
@@ -420,10 +433,16 @@ class Orchestrator:
             self._end_reels_session()
 
         # Close printer
-        self.printer.close()
+        try:
+            self.printer.close()
+        except Exception as e:
+            print(f"Printer close failed during shutdown: {e}")
 
         # Disconnect from device
-        self.capture.disconnect()
+        try:
+            self.capture.disconnect()
+        except Exception as e:
+            print(f"Capture disconnect failed during shutdown: {e}")
 
         # Print final stats
         print(f"\n{'=' * 40}")

@@ -315,6 +315,42 @@ class TestOrchestratorIntegration:
         assert "[IMAGE] header_" in content
         assert "Time Spent:" in content
 
+    def test_manual_session_continues_if_printer_header_fails(
+        self, temp_dir: Path, varying_images_dir: Path
+    ) -> None:
+        """Printer header failures should not terminate an active manual session."""
+
+        class FlakyHeaderPrinter(MockPrinter):
+            def print_header(self, session_start: str) -> None:
+                raise RuntimeError("header print failed")
+
+        config = Config(
+            output_dir=temp_dir,
+            capture_fps=60,
+            min_reel_duration=0,
+            hash_threshold=6,
+        )
+        capture = MockCapture(source=varying_images_dir, loop=True, instagram_mode=False)
+        printer = FlakyHeaderPrinter(output_dir=temp_dir, verbose=False)
+        orchestrator = Orchestrator(
+            capture=capture,
+            printer=printer,
+            config=config,
+            use_content_detection=False,
+            manual_session_start=True,
+        )
+
+        thread = threading.Thread(target=orchestrator.run)
+        thread.start()
+        time.sleep(0.6)
+
+        # Session loop should still be running even though header print failed.
+        assert thread.is_alive()
+
+        orchestrator.stop()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
     def test_session_ends_when_mirror_disconnects(self, temp_dir: Path) -> None:
         """Test active session ends automatically if mirror stream disconnects."""
         class DisconnectingMirrorCapture(BaseCapture):

@@ -34,7 +34,8 @@ def check_rongta_connected() -> bool:
     except Exception:
         pass
 
-    # Fallback path: attempt actual ESC/POS USB open (closer to print reality).
+    # Fallback path: force a real ESC/POS USB open probe.
+    # Note: constructing Usb(...) alone is lazy and can return without hardware.
     try:
         from escpos.printer import Usb
 
@@ -42,6 +43,7 @@ def check_rongta_connected() -> bool:
             printer = None
             try:
                 printer = Usb(vendor_id, product_id)
+                printer.open()  # Force backend/device handle resolution.
                 return True
             except Exception:
                 continue

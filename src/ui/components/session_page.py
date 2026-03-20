@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 from nicegui import ui
 
+from src.ui.components.printer_panel import check_rongta_connected
 from src.ui.services.device_service import device_service
 from src.ui.state import app_state
 
@@ -145,6 +146,16 @@ def create_session_page(
                         ui.timer(0.4, update_device_display)
 
             with ui.card().classes("readiness-card w-full p-7 md:p-10 gap-6"):
+                with ui.row().classes(
+                    "w-full items-start gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-red-800"
+                ) as printer_issue_banner:
+                    ui.icon("warning_amber").classes("text-2xl")
+                    with ui.column().classes("gap-1"):
+                        ui.label("Printer connection issue").classes("text-lg font-bold")
+                        printer_issue_text = ui.label(
+                            "Rongta printer not detected. Connect it before starting the session."
+                        ).classes("text-sm leading-snug")
+
                 ui.label("Ready to start scrolling?").classes("text-4xl font-extrabold")
                 ui.label(
                     "1. Take a seat.\n\n"
@@ -178,7 +189,30 @@ def create_session_page(
                         else:
                             session_hint.text = "Starting pairing service..."
 
+                last_printer_connected: bool | None = None
+
+                def update_printer_banner() -> None:
+                    nonlocal last_printer_connected
+                    connected = check_rongta_connected()
+                    if connected != last_printer_connected:
+                        app_state.set_printer_connected(connected)
+                        last_printer_connected = connected
+                    printer_issue_banner.set_visibility(not connected)
+                    if connected:
+                        return
+                    if app_state.session_active:
+                        printer_issue_text.text = (
+                            "Rongta printer appears disconnected. Session can continue, "
+                            "but printing may fail."
+                        )
+                    else:
+                        printer_issue_text.text = (
+                            "Rongta printer not detected. Connect it before starting the session."
+                        )
+
+                update_printer_banner()
                 update_session_button()
+                ui.timer(1.0, update_printer_banner)
                 ui.timer(0.3, update_session_button)
 
 
