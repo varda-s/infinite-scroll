@@ -1,9 +1,11 @@
 """Unit tests for UI tracking service start/stop behavior."""
 
 from dataclasses import dataclass
+from time import time
 from unittest.mock import patch
 
 from src.capture.base import BaseCapture, DeviceInfo, DeviceType, ForegroundApp
+from src.tracking.time_tracker import ReelSession
 from src.ui.services.tracking_service import TrackingService
 from src.ui.state import app_state, LiveReelReceipt
 
@@ -195,3 +197,29 @@ def test_live_progress_ignored_when_callbacks_disabled() -> None:
 
     assert app_state.current_reel_number == before_reel
     assert app_state.current_reel_duration == before_duration
+
+
+def test_duplicate_filter_allows_fast_distinct_reels() -> None:
+    """Rapid callbacks should pass when hashes are clearly different."""
+    service = TrackingService()
+    now = time()
+    service._last_reel_at = now - 0.2
+    service._last_reel_hash = "hash_a"
+    session = ReelSession(reel_number=2, start_time=now, screenshot=None)
+
+    with patch.object(TrackingService, "_compute_reel_hash", return_value="hash_b"), \
+         patch.object(TrackingService, "_hash_distance", return_value=20):
+        assert service._should_drop_duplicate_reel(session) is False
+
+
+def test_duplicate_filter_drops_fast_similar_reels() -> None:
+    """Rapid callbacks should be dropped when content is similar."""
+    service = TrackingService()
+    now = time()
+    service._last_reel_at = now - 0.2
+    service._last_reel_hash = "hash_a"
+    session = ReelSession(reel_number=2, start_time=now, screenshot=None)
+
+    with patch.object(TrackingService, "_compute_reel_hash", return_value="hash_b"), \
+         patch.object(TrackingService, "_hash_distance", return_value=5):
+        assert service._should_drop_duplicate_reel(session) is True

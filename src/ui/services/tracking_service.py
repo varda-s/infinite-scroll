@@ -354,17 +354,30 @@ class TrackingService:
 
     def _should_drop_duplicate_reel(self, session: ReelSession) -> bool:
         """Filter noisy duplicate reel callbacks from bursty detector transitions."""
-        now = time.time()
-        # Hard cooldown to prevent one swipe from generating multiple receipts.
-        if self._last_reel_at and now - self._last_reel_at < 2.0:
-            return True
+        rapid_cooldown_s = 0.8
+        rapid_allow_hash_distance = 14
+        recent_dup_window_s = 8.0
+        recent_dup_hash_distance = 8
 
+        now = time.time()
         new_hash = self._compute_reel_hash(session.screenshot)
+        # Rapid guard: block burst callbacks unless content is clearly different.
+        if self._last_reel_at:
+            elapsed = now - self._last_reel_at
+            if elapsed < rapid_cooldown_s:
+                if not (
+                    self._last_reel_hash
+                    and new_hash
+                    and self._hash_distance(self._last_reel_hash, new_hash) >= rapid_allow_hash_distance
+                ):
+                    return True
+
         if (
             self._last_reel_hash
             and new_hash
-            and self._hash_distance(self._last_reel_hash, new_hash) <= 8
-            and (now - self._last_reel_at) <= 8.0
+            and self._hash_distance(self._last_reel_hash, new_hash) <= recent_dup_hash_distance
+            and self._last_reel_at
+            and (now - self._last_reel_at) <= recent_dup_window_s
         ):
             return True
 
