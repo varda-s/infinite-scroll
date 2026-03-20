@@ -91,6 +91,7 @@ class Orchestrator:
                 screenshot=session.screenshot,
                 duration_seconds=session.duration,
                 reel_number=session.reel_number,
+                analysis_frames=session.analysis_frames,
             )
 
         if self.on_reel_change:

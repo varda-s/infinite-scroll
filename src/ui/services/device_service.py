@@ -7,6 +7,7 @@ from typing import Optional
 from src.capture.device_detector import DeviceDetector
 from src.capture.base import DeviceInfo
 from src.capture.mirror_launcher import MirrorLauncher
+from src.diagnostics.connection_log import log_connection_event
 from src.ui.state import app_state
 
 
@@ -26,6 +27,9 @@ class DeviceService:
         self._running = False
         self._launch_attempted = False
         self._missing_device_polls = 0
+        self._stdout_offset = 0
+        self._stderr_offset = 0
+        self._last_connected_device_id: Optional[str] = None
 
     async def start(self) -> None:
         """Start background device polling."""
@@ -34,12 +38,14 @@ class DeviceService:
 
         self._running = True
         self._launch_attempted = False
+        log_connection_event("device_service_start", f"auto_launch_mirror={self.auto_launch_mirror}")
 
         # Start uxplay alongside the Python app so no extra terminal is needed.
         if self.auto_launch_mirror:
             loop = asyncio.get_event_loop()
             ok = await loop.run_in_executor(None, self.ensure_pairing_ready, 1.0)
             if not ok:
+                log_connection_event("pairing_init_failed", "ensure_pairing_ready returned false")
                 raise RuntimeError("Failed to initialize ReelTracker pairing (uxplay).")
             # Mark launch as already handled to avoid immediate PIN rotation
             # on the first polling tick.
@@ -50,6 +56,7 @@ class DeviceService:
     async def stop(self) -> None:
         """Stop background device polling."""
         self._running = False
+        log_connection_event("device_service_stop")
         if self._task:
             self._task.cancel()
             try:
@@ -72,6 +79,8 @@ class DeviceService:
 
     async def _poll_devices(self) -> None:
         """Poll for connected devices."""
+        self._ingest_uxplay_runtime_logs()
+
         if not app_state.device_polling:
             return
 
@@ -79,6 +88,7 @@ class DeviceService:
         if self.auto_launch_mirror:
             process = app_state.uxplay_process
             if process is not None and process.poll() is not None:
+                log_connection_event("uxplay_process_exited", f"returncode={process.returncode}")
                 app_state.uxplay_process = None
                 app_state.uxplay_pairing_code = None
                 app_state.notify_update()
@@ -123,6 +133,7 @@ class DeviceService:
             # Treat sustained loss as disconnect and immediately rotate pairing
             # so the next participant must enter a fresh PIN.
             app_state.set_device(None)
+            log_connection_event("device_disconnected", f"device_id={current.device_id}")
             if self.auto_launch_mirror:
                 self.restart_pairing_for_new_session()
             return
@@ -130,22 +141,36 @@ class DeviceService:
             self._missing_device_polls = 0
         if device != current:
             app_state.set_device(device)
+            if device is None:
+                if self._last_connected_device_id:
+                    log_connection_event("device_disconnected", f"device_id={self._last_connected_device_id}")
+                    self._last_connected_device_id = None
+            else:
+                log_connection_event("device_connected", f"device_id={device.device_id}")
+                self._last_connected_device_id = device.device_id
 
     def _try_auto_launch_mirror(self) -> None:
         """Try to auto-launch a mirroring app."""
         # Booth mode only supports the ReelTracker uxplay mirror.
         if MirrorLauncher.is_uxplay_available():
+            log_connection_event("uxplay_auto_launch_attempt")
             # Store the process handle in app_state so we can clean it up
             process, pin = MirrorLauncher.launch_uxplay_with_pin()
             if process:
                 app_state.uxplay_process = process
                 app_state.uxplay_pairing_code = pin
                 app_state.notify_update()
+                log_connection_event("pairing_pin_ready", f"pin={pin} pid={process.pid}")
+            else:
+                log_connection_event("uxplay_auto_launch_failed")
+        else:
+            log_connection_event("uxplay_not_available_for_auto_launch")
 
     def ensure_pairing_ready(self, timeout_seconds: float = 3.0) -> bool:
         """Ensure uxplay process and PIN are available within a short deadline."""
         if not self.auto_launch_mirror:
             return True
+        log_connection_event("ensure_pairing_ready_start", f"timeout_seconds={timeout_seconds}")
 
         process = app_state.uxplay_process
         if process is not None and process.poll() is not None:
@@ -156,6 +181,10 @@ class DeviceService:
         # Fast path: already alive and PIN present.
         process = app_state.uxplay_process
         if process is not None and process.poll() is None and app_state.uxplay_pairing_code:
+            log_connection_event(
+                "ensure_pairing_ready_fast_path",
+                f"pid={process.pid} pin={app_state.uxplay_pairing_code}",
+            )
             return True
 
         self._try_auto_launch_mirror()
@@ -164,9 +193,14 @@ class DeviceService:
         while time.monotonic() < deadline:
             process = app_state.uxplay_process
             if process is not None and process.poll() is None and app_state.uxplay_pairing_code:
+                log_connection_event(
+                    "ensure_pairing_ready_success",
+                    f"pid={process.pid} pin={app_state.uxplay_pairing_code}",
+                )
                 return True
             # Tiny sleep keeps startup responsive while allowing process state to settle.
             time.sleep(0.05)
+        log_connection_event("ensure_pairing_ready_timeout")
         return False
 
     def _stop_uxplay(self) -> None:
@@ -174,33 +208,98 @@ class DeviceService:
         process = app_state.uxplay_process
         if process is None:
             return
+        log_connection_event("uxplay_stop_requested", f"pid={process.pid}")
         try:
             process.terminate()
             try:
                 process.wait(timeout=3.0)
             except Exception:
                 process.kill()
+                log_connection_event("uxplay_force_kill", f"pid={process.pid}")
         except Exception:
             pass
         finally:
             app_state.uxplay_process = None
             app_state.uxplay_pairing_code = None
             app_state.notify_update()
+            log_connection_event("uxplay_stopped")
 
     def restart_pairing_for_new_session(self) -> bool:
         """Restart uxplay so each session has a fresh pairing PIN."""
+        log_connection_event("pairing_rotation_requested")
         self._stop_uxplay()
         self._launch_attempted = False
         self._try_auto_launch_mirror()
+        if app_state.uxplay_pairing_code:
+            log_connection_event("pairing_rotated", f"pin={app_state.uxplay_pairing_code}")
         return app_state.uxplay_process is not None
 
     def stop_pairing_after_session(self) -> None:
         """Stop uxplay after session completion to end pairing window."""
+        log_connection_event("stop_pairing_after_session")
         self._stop_uxplay()
 
     def prime_next_user_pairing(self) -> bool:
         """Immediately rotate pairing so the next user can connect with minimal delay."""
+        log_connection_event("prime_next_user_pairing")
         return self.restart_pairing_for_new_session()
+
+    @staticmethod
+    def _classify_uxplay_line(line: str, stream: str) -> Optional[tuple[str, str]]:
+        """Map raw uxplay output lines to diagnostics events."""
+        text = line.strip()
+        if not text:
+            return None
+        lower = text.lower()
+
+        if "initialized server socket" in lower:
+            return "uxplay_advertising_ready", text
+        if "begin streaming to gstreamer video pipeline" in lower:
+            return "uxplay_stream_started", text
+        if "connection closed on socket" in lower or "removing connection for socket" in lower:
+            return "uxplay_client_disconnected", text
+        if "raop_rtp_mirror->running is no longer true" in lower or "stopping raop server" in lower:
+            return "uxplay_stream_stopped", text
+        if "rtsp" in lower and "connection" in lower:
+            return "uxplay_rtsp_connection", text
+        if "pin" in lower and ("pair" in lower or "auth" in lower or "prompt" in lower):
+            return "uxplay_pin_event", text
+        if "failed" in lower or "critical" in lower or "error" in lower:
+            return f"uxplay_{stream}_warning", text
+        return None
+
+    def _read_new_lines(self, path: str, offset: int) -> tuple[list[str], int]:
+        """Read new lines from a log file based on byte offset."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                if offset > size:
+                    offset = 0
+                handle.seek(offset)
+                data = handle.read()
+                new_offset = handle.tell()
+        except Exception:
+            return [], offset
+
+        if not data:
+            return [], new_offset
+        return data.splitlines(), new_offset
+
+    def _ingest_uxplay_runtime_logs(self) -> None:
+        """Ingest new uxplay stdout/stderr lines and emit structured diagnostics events."""
+        stdout_lines, self._stdout_offset = self._read_new_lines("output/uxplay.stdout.log", self._stdout_offset)
+        stderr_lines, self._stderr_offset = self._read_new_lines("output/uxplay.stderr.log", self._stderr_offset)
+
+        for line in stdout_lines:
+            event = self._classify_uxplay_line(line, "stdout")
+            if event is not None:
+                log_connection_event(event[0], event[1])
+
+        for line in stderr_lines:
+            event = self._classify_uxplay_line(line, "stderr")
+            if event is not None:
+                log_connection_event(event[0], event[1])
 
     def get_all_devices(self) -> list[DeviceInfo]:
         """Get all currently connected devices (synchronous)."""

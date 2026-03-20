@@ -8,13 +8,20 @@ class BasePrinter(ABC):
     """Abstract interface for receipt printers."""
 
     @abstractmethod
-    def print_reel(self, screenshot: Image.Image, duration_seconds: float, reel_number: int) -> None:
+    def print_reel(
+        self,
+        screenshot: Image.Image,
+        duration_seconds: float,
+        reel_number: int,
+        analysis_frames: list[Image.Image] | None = None,
+    ) -> None:
         """Print a reel receipt with screenshot and duration.
 
         Args:
             screenshot: The screenshot image to print.
             duration_seconds: Time spent viewing this reel.
             reel_number: Sequential number of this reel in the session.
+            analysis_frames: Optional sampled frames for categorization.
         """
         pass
 

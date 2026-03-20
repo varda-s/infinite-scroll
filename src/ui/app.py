@@ -155,9 +155,13 @@ def on_start_session() -> None:
     # Start session without user association (booth mode)
     success = tracking_service.start_session(user_id=None)
     if success:
-        ui.notify("Session started. Scroll Reels to track timings and print live receipt.", type="positive")
+        ui.notify(
+            f"Session started with {app_state.printer_type.upper()} printer.",
+            type="positive",
+        )
     else:
-        ui.notify("Failed to start session. Connect ReelTracker mirror first.", type="negative")
+        error = tracking_service.last_error or "Connect ReelTracker mirror first."
+        ui.notify(f"Failed to start session: {error}", type="negative")
 
 
 def on_stop_session() -> None:

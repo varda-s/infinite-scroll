@@ -1,0 +1,37 @@
+{
+  "name": "test03",
+  "total_duration": 24.00,
+  "total_reels": 5,
+  "reels": [
+    {
+      "reel_id": 1,
+      "start": 0.00,
+      "duration": 3.00,
+      "label": "fast_scroll"
+    },
+    {
+      "reel_id": 2,
+      "start": 3.00,
+      "duration": 4.00,
+      "label": "content"
+    },
+    {
+      "reel_id": 3,
+      "start": 7.00,
+      "duration": 7.00,
+      "label": "content"
+    },
+    {
+      "reel_id": 4,
+      "start": 14.00,
+      "duration": 5.00,
+      "label": "ad"
+    },
+    {
+      "reel_id": 5,
+      "start": 19.00,
+      "duration": 5.00,
+      "label": "ad_end"
+    }
+  ]
+}

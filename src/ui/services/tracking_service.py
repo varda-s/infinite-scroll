@@ -60,11 +60,17 @@ class TrackingService:
         self._session_output_dir: Optional[Path] = None
         self._last_reel_hash: Optional[str] = None
         self._last_reel_at: float = 0.0
+        self._last_error: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
         """Check if a session is running."""
         return self._running
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """Last start-up error, if any."""
+        return self._last_error
 
     def start_session(self, user_id: int = None) -> bool:
         """Start a tracking session.
@@ -77,6 +83,7 @@ class TrackingService:
         """
         if self._running or self._stop_in_progress:
             return False
+        self._last_error = None
 
         # Kiosk flow: if a mirror is already connected, use it directly.
         # Do not rotate pairing here because that would drop an active mirror and
@@ -97,14 +104,21 @@ class TrackingService:
         # Mirror detection can briefly flap; retry for a short window.
         capture = self._create_capture_with_retry(device, timeout_seconds=6.0)
         if capture is None:
+            self._last_error = "Unable to attach to ReelTracker mirror."
             return False
 
         # Validate capture connectivity before mutating app/database state.
         if not capture.connect():
+            self._last_error = "Failed to connect to mirror capture stream."
             return False
 
         # Create printer
-        printer = self._create_printer()
+        try:
+            printer = self._create_printer()
+        except Exception as e:
+            capture.disconnect()
+            self._last_error = str(e)
+            return False
 
         # Create config from database settings
         config = self._create_config()
@@ -242,17 +256,30 @@ class TrackingService:
         if app_state.printer_type == "mock":
             printer = UIAwareMockPrinter(output_dir=output_dir, verbose=False)
             printer.set_line_callback(self._on_receipt_line)
+            app_state.set_printer_connected(False)
             return printer
         else:
-            # For Rongta, use the mock for now - can add real ESC/POS later
             from src.printing.escpos_printer import ESCPOSPrinter
             try:
-                return ESCPOSPrinter()
-            except Exception:
-                # Fall back to mock if printer not available
-                printer = UIAwareMockPrinter(output_dir=output_dir, verbose=False)
-                printer.set_line_callback(self._on_receipt_line)
+                # Legacy booth path from timepiece.py (known working Rongta IDs).
+                printer = ESCPOSPrinter(
+                    vendor_id=0x0FE6,
+                    product_id=0x811E,
+                    auto_detect=False,
+                )
+                app_state.set_printer_connected(True)
                 return printer
+            except Exception as legacy_error:
+                try:
+                    printer = ESCPOSPrinter(auto_detect=True)
+                    app_state.set_printer_connected(True)
+                    return printer
+                except Exception as e:
+                    app_state.set_printer_connected(False)
+                    raise RuntimeError(
+                        f"Rongta printer connection failed. Legacy IDs error: {legacy_error}. "
+                        f"Auto-detect error: {e}"
+                    ) from e
 
     def _run_orchestrator(self) -> None:
         """Run orchestrator in background thread."""

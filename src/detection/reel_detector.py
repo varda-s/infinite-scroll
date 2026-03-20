@@ -38,6 +38,7 @@ class ReelState:
     transition_quiet_frames: int = 0
     ui_signature: tuple[str, str] | None = None
     candidate_signature: tuple[str, str] | None = None
+    candidate_hash: str | None = None
     candidate_count: int = 0
     previous_gray: np.ndarray | None = None
     last_motion_right: float = 0.0
@@ -133,26 +134,36 @@ class ReelDetector:
     def _compute_ui_signature(self, frame: Image.Image) -> tuple[str, str]:
         """Compute signature from UI regions that change between reels."""
         width, height = frame.size
-        # Focus on the right interaction rail (like/comment/share/profile stack),
-        # which is the most stable Instagram-specific reel identity signal.
+        # Focus on overlay masks rather than raw pixels so video-content motion
+        # contributes less to the signature than the fixed Instagram UI chrome.
         right = frame.crop(
             (
-                int(width * 0.76),
+                int(width * 0.81),
                 int(height * 0.24),
-                int(width * 0.985),
-                int(height * 0.92),
+                int(width * 0.95),
+                int(height * 0.90),
             )
         )
-        # Include the lower caption/author line as a secondary identity signal.
         bottom = frame.crop(
             (
-                int(width * 0.03),
-                int(height * 0.72),
-                int(width * 0.83),
-                int(height * 0.97),
+                int(width * 0.04),
+                int(height * 0.76),
+                int(width * 0.78),
+                int(height * 0.94),
             )
         )
-        return (str(compute_phash(right)), str(compute_phash(bottom)))
+
+        right_mask = self._ui_overlay_mask(right, size=(80, 200))
+        bottom_mask = self._ui_overlay_mask(bottom, size=(240, 80))
+        return (str(compute_phash(right_mask, hash_size=12)), str(compute_phash(bottom_mask, hash_size=12)))
+
+    def _ui_overlay_mask(self, region: Image.Image, size: tuple[int, int]) -> Image.Image:
+        """Extract a coarse binary mask of bright UI overlay elements."""
+        gray = np.array(region.convert("L").resize(size, Image.Resampling.BILINEAR))
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Instagram reel UI text/icons are usually high-contrast overlay glyphs.
+        _, mask = cv2.threshold(blur, 150, 255, cv2.THRESH_BINARY)
+        return Image.fromarray(mask)
 
     def _signature_distance(
         self, sig1: tuple[str, str] | None, sig2: tuple[str, str] | None
@@ -202,16 +213,90 @@ class ReelDetector:
         )
         content_diff = self._hash_distance(current_hash, self._state.current_hash)
 
-        # Primary signal: right-side interaction rail moved materially.
-        if right_diff >= 6:
+        # Primary signal: both stable UI anchor regions changed.
+        if right_diff >= 4 and bottom_diff >= 4:
             return True
-        # Secondary: both right rail and bottom caption region changed.
-        if right_diff >= 4 and bottom_diff >= 5:
+        # Strong right-rail change is often enough on its own.
+        if right_diff >= 7:
             return True
-        # Conservative fallback: require both UI drift and strong content shift.
-        if right_diff >= 3 and bottom_diff >= 6 and content_diff >= 14:
+        # Bottom/caption drift needs backing from content drift.
+        if bottom_diff >= 8 and content_diff >= 10:
+            return True
+        # Conservative fallback: moderate UI drift plus strong content shift.
+        if right_diff >= 3 and bottom_diff >= 5 and content_diff >= 12:
             return True
         return False
+
+    def _same_signature(
+        self,
+        sig1: tuple[str, str] | None,
+        sig2: tuple[str, str] | None,
+        tolerance: int = 2,
+    ) -> bool:
+        """Return True when two UI signatures are effectively the same reel."""
+        if sig1 is None or sig2 is None:
+            return False
+        right_diff = self._single_hash_distance(sig1[0], sig2[0])
+        bottom_diff = self._single_hash_distance(sig1[1], sig2[1])
+        return right_diff <= tolerance and bottom_diff <= tolerance
+
+    def _reset_candidate(self) -> None:
+        self._state.candidate_signature = None
+        self._state.candidate_hash = None
+        self._state.candidate_count = 0
+        self._state.pending_screenshot = None
+
+    def _confirm_candidate_reel(
+        self,
+        frame: Image.Image,
+        current_hash: str,
+        new_sig: tuple[str, str],
+    ) -> ReelChangeType:
+        """Confirm a new reel from stable UI signatures."""
+        if self._same_signature(new_sig, self._state.ui_signature):
+            self._reset_candidate()
+            self._state.last_screenshot = frame.copy()
+            self._state.consecutive_same_frames += 1
+            return ReelChangeType.NONE
+
+        if not self._is_reel_change(new_sig, current_hash):
+            self._reset_candidate()
+            self._state.last_screenshot = frame.copy()
+            self._state.consecutive_same_frames += 1
+            return ReelChangeType.NONE
+
+        if self._same_signature(new_sig, self._state.candidate_signature):
+            self._state.candidate_count += 1
+        else:
+            self._state.candidate_signature = new_sig
+            self._state.candidate_hash = current_hash
+            self._state.candidate_count = 1
+            self._state.pending_screenshot = frame.copy()
+
+        if self._state.candidate_count < self.stable_frames:
+            self._state.consecutive_same_frames += 1
+            return ReelChangeType.NONE
+
+        self._state.previous_hash = self._state.current_hash
+        self._state.current_hash = self._state.candidate_hash or current_hash
+        self._state.ui_signature = self._state.candidate_signature or new_sig
+        self._state.last_screenshot = self._state.pending_screenshot or frame.copy()
+        self._state.is_in_transition = False
+        self._state.transition_started_from_black = False
+        self._state.transition_quiet_frames = 0
+        self._state.transition_frame_count = 0
+        self._state.transition_peak_motion_right = 0.0
+        self._state.transition_peak_motion_center = 0.0
+        self._state.transition_peak_icon_shift = 0.0
+        self._state.transition_peak_vertical_shift = 0.0
+        self._state.transition_peak_center_vertical_shift = 0.0
+        self._state.consecutive_same_frames = 1
+        self._reset_candidate()
+        if self._can_emit_new_reel():
+            self._state.waiting_for_post_reel_stable = True
+            self._state.post_reel_stable_frames = 0
+            return ReelChangeType.NEW_REEL
+        return ReelChangeType.NONE
 
     def _estimate_vertical_shift(self, prev: np.ndarray, curr: np.ndarray) -> float:
         """Estimate dominant vertical shift via row-profile cross correlation."""
@@ -413,9 +498,7 @@ class ReelDetector:
         if self._state.is_in_transition and self._is_transition_frame(frame):
             self._state.transition_started_from_black = True
             self._state.transition_quiet_frames = 0
-            self._state.candidate_signature = None
-            self._state.candidate_count = 0
-            self._state.pending_screenshot = None
+            self._reset_candidate()
             self._state.consecutive_same_frames = 0
             return ReelChangeType.TRANSITION
 
@@ -429,9 +512,9 @@ class ReelDetector:
             self._state.last_screenshot = frame.copy()
             self._state.consecutive_same_frames = 1
             return ReelChangeType.NEW_REEL if self._can_emit_new_reel() else ReelChangeType.NONE
+        new_sig = self._compute_ui_signature(frame)
         if self._state.is_in_transition:
             self._state.transition_frame_count += 1
-            new_sig = self._compute_ui_signature(frame)
 
             settled = (
                 motion_right <= self.settle_motion_right_threshold
@@ -444,7 +527,7 @@ class ReelDetector:
                     self._state.pending_screenshot = frame.copy()
             else:
                 self._state.transition_quiet_frames = 0
-                self._state.pending_screenshot = None
+                self._reset_candidate()
 
             transition_was_real_swipe = (
                 self._state.transition_peak_motion_right >= 6.0
@@ -457,31 +540,8 @@ class ReelDetector:
                 and self._has_recent_scroll_gesture(max_age_frames=60)
             )
 
-            if (
-                settled
-                and transition_was_real_swipe
-                and self._is_reel_change(new_sig, current_hash)
-            ):
-                self._state.previous_hash = self._state.current_hash
-                self._state.current_hash = current_hash
-                self._state.ui_signature = new_sig
-                self._state.last_screenshot = self._state.pending_screenshot or frame.copy()
-                self._state.is_in_transition = False
-                self._state.transition_started_from_black = False
-                self._state.transition_quiet_frames = 0
-                self._state.transition_frame_count = 0
-                self._state.transition_peak_motion_right = 0.0
-                self._state.transition_peak_motion_center = 0.0
-                self._state.transition_peak_icon_shift = 0.0
-                self._state.transition_peak_vertical_shift = 0.0
-                self._state.transition_peak_center_vertical_shift = 0.0
-                self._state.pending_screenshot = None
-                self._state.consecutive_same_frames = 1
-                if self._can_emit_new_reel():
-                    self._state.waiting_for_post_reel_stable = True
-                    self._state.post_reel_stable_frames = 0
-                    return ReelChangeType.NEW_REEL
-                return ReelChangeType.NONE
+            if settled and transition_was_real_swipe:
+                return self._confirm_candidate_reel(frame, current_hash, new_sig)
 
             if self._state.transition_quiet_frames >= self.transition_frames:
                 self._state.is_in_transition = False
@@ -489,8 +549,7 @@ class ReelDetector:
                 self._state.transition_quiet_frames = 0
                 self._state.transition_frame_count = 0
                 self._state.consecutive_same_frames = 1
-
-                self._state.pending_screenshot = None
+                self._reset_candidate()
                 self._state.transition_peak_motion_right = 0.0
                 self._state.transition_peak_motion_center = 0.0
                 self._state.transition_peak_icon_shift = 0.0
@@ -506,7 +565,7 @@ class ReelDetector:
                 self._state.transition_quiet_frames = 0
                 self._state.transition_frame_count = 0
                 self._state.consecutive_same_frames = 1
-                self._state.pending_screenshot = None
+                self._reset_candidate()
                 self._state.transition_peak_motion_right = 0.0
                 self._state.transition_peak_motion_center = 0.0
                 self._state.transition_peak_icon_shift = 0.0
@@ -515,6 +574,12 @@ class ReelDetector:
                 return ReelChangeType.NONE
 
             return ReelChangeType.TRANSITION
+
+        # Stable frames can still reveal a new reel even if explicit motion
+        # tracking missed the swipe onset; confirm via fixed UI regions.
+        if settled_now and self._has_recent_scroll_gesture(max_age_frames=max(18, self.new_reel_cooldown_frames)):
+            return self._confirm_candidate_reel(frame, current_hash, new_sig)
+        self._reset_candidate()
 
         # Detect swipe onset from motion burst: right icon rail moves with content.
         # This must run only when we're not already in transition; otherwise

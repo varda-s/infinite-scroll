@@ -20,6 +20,7 @@ from src.printing.legacy_format import (
     preprocess_reel_screenshot,
     resize_for_legacy_printer_width,
 )
+from src.time_utils import format_receipt_timestamp
 
 
 class MockPrinter(BasePrinter):
@@ -58,14 +59,24 @@ class MockPrinter(BasePrinter):
     def print_header(self, session_start: str) -> None:
         self._print_legacy_asset("header.png", "header")
 
-    def print_reel(self, screenshot: Image.Image, duration_seconds: float, reel_number: int) -> None:
+    def print_reel(
+        self,
+        screenshot: Image.Image,
+        duration_seconds: float,
+        reel_number: int,
+        analysis_frames: list[Image.Image] | None = None,
+    ) -> None:
         processed = preprocess_reel_screenshot(screenshot)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = self.output_dir / f"reel_{self._session_id}_{reel_number:04d}.png"
         resize_for_legacy_printer_width(processed, side_margin_mm=SIDE_MARGIN_MM).save(screenshot_path)
 
         # Start Gemini classification in parallel; topic is populated before summary print.
-        self._categorizer.submit(reel_number=reel_number, screenshot=processed)
+        self._categorizer.submit(
+            reel_number=reel_number,
+            screenshot=processed,
+            analysis_frames=analysis_frames,
+        )
         topic = "Processing..."
         self._reel_entries[reel_number] = ReelReceiptEntry(
             reel_number=reel_number,
@@ -73,9 +84,10 @@ class MockPrinter(BasePrinter):
             topic=topic,
         )
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = format_receipt_timestamp()
         self._add_receipt_line(f"Started: {ts}")
         self._add_receipt_line(f"[IMAGE] {screenshot_path.name}")
+        self._add_receipt_line("")
         self._add_receipt_line(f"Time Spent: {duration_seconds:.2f}s")
 
     def print_summary(self, total_reels: int, total_time_seconds: float) -> None:

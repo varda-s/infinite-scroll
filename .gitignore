@@ -213,4 +213,5 @@ output/
 *screentimecode
 .nicegui/
 *DS_Store
-
+tests/testsessions/test01/test01.MP4
+tests/testsessions/test02/test02.mov

@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from src.diagnostics.connection_log import log_connection_event
+
 
 class MirrorLauncher:
     """Launch and manage iPhone mirroring applications."""
@@ -217,6 +219,7 @@ class MirrorLauncher:
             (process, pin) tuple. If launch fails, both values are None.
         """
         if not cls.is_uxplay_available():
+            log_connection_event("uxplay_unavailable", "Could not resolve uxplay binary")
             return None, None
 
         try:
@@ -224,16 +227,21 @@ class MirrorLauncher:
 
             binary = str(cls.LOCAL_UXPLAY_BIN) if cls.LOCAL_UXPLAY_BIN.exists() else "uxplay"
             cwd = str(cls.LOCAL_UXPLAY_CWD) if cls.LOCAL_UXPLAY_CWD.exists() else None
+            log_connection_event(
+                "uxplay_launch_requested",
+                f"server={server_name} pin={pairing_pin} fps={fps} binary={binary}",
+            )
 
             # Prevent stale/manual ReelTracker uxplay instances from competing for
             # AirPlay discovery and bypassing the expected PIN flow.
             try:
                 subprocess.run(
                     ["pkill", "-f", "uxplay -n ReelTracker"],
-                    capture_output=True,
-                    timeout=2,
-                )
+                capture_output=True,
+                timeout=2,
+            )
                 time.sleep(0.2)
+                log_connection_event("uxplay_stale_process_cleanup", "pkill attempted for ReelTracker")
             except Exception:
                 pass
 
@@ -263,9 +271,18 @@ class MirrorLauncher:
             # Ensure process stays alive long enough to advertise.
             time.sleep(0.7)
             if process.poll() is not None:
+                log_connection_event(
+                    "uxplay_launch_failed",
+                    f"process exited early returncode={process.returncode}",
+                )
                 return None, None
+            log_connection_event(
+                "uxplay_started",
+                f"pid={process.pid} server={server_name} pin={pairing_pin}",
+            )
             return process, pairing_pin
-        except Exception:
+        except Exception as exc:
+            log_connection_event("uxplay_launch_exception", repr(exc))
             return None, None
     LOCAL_UXPLAY_BIN = Path("/Users/amanagarwal/Desktop/Stanford/UxPlay/uxplay")
     LOCAL_UXPLAY_CWD = Path("/Users/amanagarwal/Desktop/Stanford/UxPlay")

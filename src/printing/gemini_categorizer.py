@@ -12,13 +12,11 @@ import re
 
 from PIL import Image
 
-from src.printing.legacy_format import placeholder_topic
-
 MODEL_PREFERENCE = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
+    "models/gemini-2.5-flash-lite",
+    "models/gemini-2.5-flash",
+    "models/gemini-2.0-flash-lite",
+    "models/gemini-2.0-flash",
 ]
 
 
@@ -33,26 +31,39 @@ class GeminiCategorizer:
 
         self._api_key = self._load_api_key()
         self._model_name = self._resolve_model_name()
-        self._enabled = bool(self._api_key and self._model_name)
+        self._sdk_available = self._check_sdk_available()
+        self._enabled = bool(self._api_key and self._model_name and self._sdk_available)
         self._executor: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gemini-reel")
             if self._enabled
             else None
         )
 
-    def submit(self, reel_number: int, screenshot: Image.Image) -> None:
+    def submit(
+        self,
+        reel_number: int,
+        screenshot: Image.Image,
+        analysis_frames: list[Image.Image] | None = None,
+    ) -> None:
         """Submit screenshot categorization request."""
         if self._executor is None:
-            print(
-                f"[Gemini] Reel {reel_number}: categorizer disabled, using placeholder topic."
-            )
+            reason = []
+            if not self._api_key:
+                reason.append("missing API key")
+            if not self._model_name:
+                reason.append("missing model")
+            if not self._sdk_available:
+                reason.append("google-genai not installed")
+            why = ", ".join(reason) if reason else "unknown reason"
+            print(f"[Gemini] Reel {reel_number}: categorizer disabled ({why}), using fallback topic.")
             with self._lock:
-                self._results[reel_number] = placeholder_topic(reel_number)
+                self._results[reel_number] = "Unclassified"
             return
 
         image_copy = screenshot.copy()
+        frame_copies = [frame.copy() for frame in (analysis_frames or [])[:6]]
         print(f"[Gemini] Reel {reel_number}: queued categorization request.")
-        future = self._executor.submit(self._classify_safe, reel_number, image_copy)
+        future = self._executor.submit(self._classify_safe, reel_number, image_copy, frame_copies)
         with self._lock:
             self._futures[reel_number] = future
 
@@ -82,41 +93,58 @@ class GeminiCategorizer:
             self._executor.shutdown(wait=False)
             self._executor = None
 
-    def _classify_safe(self, reel_number: int, screenshot: Image.Image) -> str:
+    def _classify_safe(
+        self,
+        reel_number: int,
+        screenshot: Image.Image,
+        analysis_frames: list[Image.Image],
+    ) -> str:
         try:
-            return self._classify(reel_number, screenshot)
+            return self._classify(reel_number, screenshot, analysis_frames)
         except Exception as e:
-            print(f"[Gemini] Reel {reel_number}: request failed ({e}), using placeholder.")
-            return placeholder_topic(reel_number)
+            print(f"[Gemini] Reel {reel_number}: request failed ({e}), using fallback.")
+            return "Unclassified"
 
-    def _classify(self, reel_number: int, screenshot: Image.Image) -> str:
+    def _classify(
+        self,
+        reel_number: int,
+        screenshot: Image.Image,
+        analysis_frames: list[Image.Image],
+    ) -> str:
         client = self._get_thread_client()
         if client is None or not self._model_name:
-            return placeholder_topic(reel_number)
+            return "Unclassified"
 
         from google.genai import types as genai_types  # type: ignore
 
-        buffer = io.BytesIO()
-        screenshot.save(buffer, format="JPEG", quality=90)
-        image_bytes = buffer.getvalue()
+        frames = self._prepare_analysis_frames(screenshot, analysis_frames)
+        parts = []
+        total_bytes = 0
+        for frame in frames:
+            buffer = io.BytesIO()
+            frame.save(buffer, format="JPEG", quality=88)
+            image_bytes = buffer.getvalue()
+            total_bytes += len(image_bytes)
+            parts.append(genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
 
         prompt = (
-            "Return ONLY one concise main category/topic for this social media reel screenshot. "
-            "Examples: Cooking Tutorial, Tech Review, Comedy Skit, Travel Vlog, Fashion Ad, "
-            "Sports Highlight, Food Review."
+            "You are classifying one Instagram reel from several sampled frames taken across the same clip. "
+            "Infer the most specific subject or content type visible across the frames. "
+            "Return ONLY one short label, 2 to 5 words. "
+            "Prefer concrete topics like 'Street Interview', 'Sneaker Ad', 'Makeup Tutorial', "
+            "'Stand-up Comedy', 'Gaming Clip', 'Recipe Demo', 'Workout Advice'. "
+            "Do NOT return generic labels like 'Content', 'Entertainment', 'Video', 'Social Media', "
+            "'Lifestyle', 'Miscellaneous', or 'Advertisement' unless the frames truly reveal nothing else."
         )
         started_at = time.time()
         print(
             f"[Gemini] Reel {reel_number}: calling model='{self._model_name}' "
-            f"(image_bytes={len(image_bytes)})."
+            f"(frames={len(frames)} bytes={total_bytes})."
         )
 
         response = client.models.generate_content(
             model=self._model_name,
-            contents=[
-                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                prompt,
-            ],
+            contents=[*parts, prompt],
         )
         elapsed_ms = (time.time() - started_at) * 1000.0
         raw_text = (getattr(response, "text", "") or "").strip()
@@ -126,12 +154,55 @@ class GeminiCategorizer:
         )
         topic = raw_text
         if not topic:
-            return placeholder_topic(reel_number)
+            return "Unclassified"
         # Keep category short enough for receipt width.
         topic = " ".join(topic.split())
+        topic = re.sub(r"^topic\s*:\s*", "", topic, flags=re.IGNORECASE)
         topic = re.sub(r"[\[\]\$\n\r\t]", "", topic)
         topic = topic.strip(" .-")
-        return topic[:22] or placeholder_topic(reel_number)
+        topic = re.sub(r"^(category|label)\s*:\s*", "", topic, flags=re.IGNORECASE)
+        if topic.lower() in {"content", "video", "entertainment", "social media", "miscellaneous"}:
+            return "Unclassified"
+        return topic[:22] or "Unclassified"
+
+    def _prepare_analysis_frames(
+        self,
+        screenshot: Image.Image,
+        analysis_frames: list[Image.Image],
+    ) -> list[Image.Image]:
+        """Return a small diverse set of frames for Gemini classification."""
+        frames = analysis_frames[:] if analysis_frames else [screenshot]
+        if not frames:
+            frames = [screenshot]
+
+        selected: list[Image.Image] = []
+        if frames:
+            selected.append(frames[0])
+        if len(frames) >= 3:
+            selected.append(frames[len(frames) // 2])
+        if len(frames) >= 2:
+            selected.append(frames[-1])
+
+        # Deduplicate object identities while keeping order.
+        deduped: list[Image.Image] = []
+        seen_ids: set[int] = set()
+        for frame in selected:
+            marker = id(frame)
+            if marker in seen_ids:
+                continue
+            seen_ids.add(marker)
+            deduped.append(self._normalize_frame(frame))
+        return deduped[:3] or [self._normalize_frame(screenshot)]
+
+    def _normalize_frame(self, frame: Image.Image) -> Image.Image:
+        """Resize and normalize frames for Gemini requests."""
+        image = frame.convert("RGB")
+        max_width = 720
+        if image.width <= max_width:
+            return image
+        scale = max_width / float(image.width)
+        new_size = (max_width, max(1, int(image.height * scale)))
+        return image.resize(new_size, Image.Resampling.LANCZOS)
 
     def _get_thread_client(self):
         if not self._api_key:
@@ -152,27 +223,9 @@ class GeminiCategorizer:
         explicit = os.getenv("GEMINI_MODEL_NAME", "").strip()
         if explicit:
             return explicit
-
-        client = self._bootstrap_client()
-        if client is None:
-            return None
-
-        try:
-            model_map: dict[str, str] = {}
-            for model in client.models.list():
-                name = getattr(model, "name", "") or ""
-                if not name:
-                    continue
-                normalized = name.removeprefix("models/")
-                model_map[normalized] = name
-
-            for preferred in MODEL_PREFERENCE:
-                if preferred in model_map:
-                    return model_map[preferred]
-        except Exception:
-            pass
-
-        return MODEL_PREFERENCE[0]
+        if self._api_key:
+            return MODEL_PREFERENCE[0]
+        return None
 
     def _bootstrap_client(self):
         if not self._api_key:
@@ -183,6 +236,14 @@ class GeminiCategorizer:
             return genai.Client(api_key=self._api_key)
         except Exception:
             return None
+
+    @staticmethod
+    def _check_sdk_available() -> bool:
+        try:
+            from google import genai  # type: ignore  # noqa: F401
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _load_api_key() -> str:

@@ -16,6 +16,8 @@ class ReelSession:
     start_time: float
     end_time: float | None = None
     screenshot: Image.Image | None = None
+    analysis_frames: list[Image.Image] = field(default_factory=list)
+    last_analysis_sample_at: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -53,6 +55,8 @@ class TimeTracker:
         self,
         min_duration: float = 0.5,
         screenshot_update_window_seconds: float = 0.8,
+        analysis_sample_interval_seconds: float = 1.5,
+        max_analysis_frames: int = 4,
         on_reel_complete: Callable[[ReelSession], None] | None = None,
     ) -> None:
         """Initialize time tracker.
@@ -65,6 +69,8 @@ class TimeTracker:
         """
         self.min_duration = min_duration
         self.screenshot_update_window_seconds = screenshot_update_window_seconds
+        self.analysis_sample_interval_seconds = analysis_sample_interval_seconds
+        self.max_analysis_frames = max_analysis_frames
         self.on_reel_complete = on_reel_complete
 
         self._current_reel: ReelSession | None = None
@@ -141,6 +147,8 @@ class TimeTracker:
             reel_number=reel_number,
             start_time=time(),
             screenshot=screenshot,
+            analysis_frames=[screenshot.copy()] if screenshot is not None else [],
+            last_analysis_sample_at=0.0,
         )
 
         return previous_session
@@ -156,6 +164,26 @@ class TimeTracker:
             and self._current_reel.duration <= self.screenshot_update_window_seconds
         ):
             self._current_reel.screenshot = screenshot
+            if self._current_reel.analysis_frames:
+                self._current_reel.analysis_frames[0] = screenshot.copy()
+            else:
+                self._current_reel.analysis_frames.append(screenshot.copy())
+            self._current_reel.last_analysis_sample_at = 0.0
+
+        if self._current_reel is None:
+            return
+
+        elapsed = self._current_reel.duration
+        if len(self._current_reel.analysis_frames) >= self.max_analysis_frames:
+            return
+        if (
+            elapsed - self._current_reel.last_analysis_sample_at
+            < self.analysis_sample_interval_seconds
+        ):
+            return
+
+        self._current_reel.analysis_frames.append(screenshot.copy())
+        self._current_reel.last_analysis_sample_at = elapsed
 
     def _end_current_reel(self) -> ReelSession | None:
         """End current reel tracking.

@@ -1,7 +1,6 @@
 """ESC/POS thermal receipt printer implementation."""
 
 import time
-from datetime import datetime
 from enum import Enum
 
 from PIL import Image
@@ -20,6 +19,7 @@ from src.printing.legacy_format import (
     play_legacy_audio,
     preprocess_reel_screenshot,
 )
+from src.time_utils import format_receipt_timestamp
 
 
 class PrinterModel(Enum):
@@ -101,6 +101,7 @@ class ESCPOSPrinter(BasePrinter):
             # Try USB connection with specific IDs
             if self.vendor_id and self.product_id:
                 self._printer = Usb(self.vendor_id, self.product_id)
+                self._reset_printer()
                 return
 
             # Try auto-detect Rongta printers
@@ -109,6 +110,7 @@ class ESCPOSPrinter(BasePrinter):
                     try:
                         self._printer = Usb(vid, pid)
                         print(f"Found Rongta printer: VID=0x{vid:04X}, PID=0x{pid:04X}")
+                        self._reset_printer()
                         return
                     except Exception:
                         continue
@@ -116,6 +118,7 @@ class ESCPOSPrinter(BasePrinter):
             # Fall back to file/device path
             if self.device_path:
                 self._printer = File(self.device_path)
+                self._reset_printer()
             else:
                 raise RuntimeError(
                     "No printer found. Specify --vendor-id/--product-id or --printer-device"
@@ -173,13 +176,91 @@ class ESCPOSPrinter(BasePrinter):
         canvas.paste(resized, (x, 0))
         return canvas
 
+    def _reset_printer(self) -> None:
+        """Hard reset printer state using ESC/POS initialize."""
+        if not self._printer:
+            return
+        try:
+            self._printer._raw(b"\x1b@")
+        except Exception:
+            pass
+        self._reset_style()
+
+    @staticmethod
+    def _align_code(align: str) -> int:
+        return {"left": 0, "center": 1, "right": 2}.get(align, 0)
+
+    def _set_style(self, align: str = "left", bold: bool = False, width: int = 1, height: int = 1) -> None:
+        """Force style with both driver API and raw ESC/POS commands."""
+        if not self._printer:
+            return
+        try:
+            self._printer.set(align=align, bold=bold, width=width, height=height)
+        except TypeError:
+            pass
+        except Exception:
+            pass
+
+        try:
+            self._printer.set(align=align, width=width, height=height)
+        except Exception:
+            pass
+
+        try:
+            self._printer._raw(b"\x1ba" + bytes([self._align_code(align)]))
+            self._printer._raw(b"\x1bE" + (b"\x01" if bold else b"\x00"))
+            size = max(0, width - 1) << 4 | max(0, height - 1)
+            self._printer._raw(b"\x1d!" + bytes([size]))
+        except Exception:
+            pass
+
+    def _reset_style(self) -> None:
+        """Force printer back to normal text mode."""
+        if not self._printer:
+            return
+        try:
+            self._printer.set(align="left", width=1, height=1, bold=False)
+        except Exception:
+            pass
+
+        try:
+            self._printer._raw(b"\x1ba\x00")
+            self._printer._raw(b"\x1bE\x00")
+            self._printer._raw(b"\x1d!\x00")
+        except Exception:
+            pass
+
+    def _text_line(
+        self,
+        text: str,
+        align: str = "left",
+        bold: bool = False,
+        dbl_width: bool = False,
+        dbl_height: bool = False,
+    ) -> None:
+        """Print one text line and always reset style afterward."""
+        if not self._printer:
+            return
+        try:
+            self._set_style(
+                align=align,
+                bold=bold,
+                width=2 if dbl_width else 1,
+                height=2 if dbl_height else 1,
+            )
+            self._printer.text(f"{text}\n")
+        finally:
+            self._reset_style()
+
     def _print_legacy_asset(self, asset_name: str) -> None:
         if not self._printer:
             return
         asset_img = load_legacy_image(asset_name)
         if asset_img is None:
             return
+        self._reset_style()
         self._printer.image(self._prepare_image(asset_img))
+        self._reset_style()
 
     def _safe_feed(self, lines: int) -> None:
         if not self._printer:
@@ -198,12 +279,22 @@ class ESCPOSPrinter(BasePrinter):
 
         self._print_legacy_asset("header.png")
 
-    def print_reel(self, screenshot: Image.Image, duration_seconds: float, reel_number: int) -> None:
+    def print_reel(
+        self,
+        screenshot: Image.Image,
+        duration_seconds: float,
+        reel_number: int,
+        analysis_frames: list[Image.Image] | None = None,
+    ) -> None:
         if not self._printer:
             return
 
         processed = preprocess_reel_screenshot(screenshot)
-        self._categorizer.submit(reel_number=reel_number, screenshot=processed)
+        self._categorizer.submit(
+            reel_number=reel_number,
+            screenshot=processed,
+            analysis_frames=analysis_frames,
+        )
         topic = "Processing..."
         self._reel_entries[reel_number] = ReelReceiptEntry(
             reel_number=reel_number,
@@ -211,15 +302,15 @@ class ESCPOSPrinter(BasePrinter):
             topic=topic,
         )
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._printer.set(align="center", bold=False, width=1, height=1)
-        self._printer.text(f"Started: {ts}\n")
+        ts = format_receipt_timestamp()
+        self._text_line(f"Started: {ts}", align="center", bold=False)
 
+        self._reset_style()
         self._printer.image(self._prepare_image(processed, side_margin_mm=SIDE_MARGIN_MM))
+        self._reset_style()
+        self._safe_feed(1)
 
-        self._printer.set(align="center", bold=True, width=1, height=1)
-        self._printer.text(f"Time Spent: {duration_seconds:.2f}s\n")
-        self._printer.set(align="left", bold=False, width=1, height=1)
+        self._text_line(f"Time Spent: {duration_seconds:.2f}s", align="center", bold=True)
 
     def print_summary(self, total_reels: int, total_time_seconds: float) -> None:
         if not self._printer:
@@ -251,35 +342,28 @@ class ESCPOSPrinter(BasePrinter):
 
         for idx, line in enumerate(lines):
             if idx == 0 and line == "REEL RECEIPT":
-                self._printer.set(align="center", bold=True, double_width=True, double_height=True)
-                self._printer.text(f"{line}\n")
-                self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+                self._text_line(line, align="center", bold=True, dbl_width=False, dbl_height=False)
                 continue
 
             if line == "NO REELS RECORDED":
-                self._printer.set(align="center", bold=True, double_width=True, double_height=True)
-                self._printer.text(f"{line}\n")
-                self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+                self._text_line(line, align="center", bold=True, dbl_width=False, dbl_height=False)
                 continue
 
             if line.startswith("TOTAL"):
-                self._printer.set(align="left", bold=True, double_width=False, double_height=False)
-                self._printer.text(f"{line}\n")
-                self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+                self._text_line(line, align="left", bold=True, dbl_width=False, dbl_height=False)
                 continue
 
             if not fed_after_totals and line.startswith("You spent"):
                 self._safe_feed(1)
                 fed_after_totals = True
 
-            self._printer.set(align="left", bold=False, double_width=False, double_height=False)
-            self._printer.text(f"{line}\n")
+            self._text_line(line, align="left", bold=False, dbl_width=False, dbl_height=False)
 
         self._print_legacy_asset("footer.png")
         self._safe_feed(6)
         time.sleep(1.0)
         play_legacy_audio("waitaudio.wav", blocking=False)
-        self._printer.set(align="left", bold=False, double_width=False, double_height=False)
+        self._reset_style()
 
     def cut(self) -> None:
         """Cut the receipt paper."""

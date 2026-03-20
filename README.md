@@ -51,6 +51,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+`requirements.txt` includes `google-genai`, which is required for Gemini-based reel categorization.
+On a new laptop, if categorization shows `Unclassified` for every reel, first make sure the app is running from this virtualenv after the install above.
+
 ## Install / Build UxPlay (Homebrew + Source Build)
 
 ### 1. Install macOS build tools

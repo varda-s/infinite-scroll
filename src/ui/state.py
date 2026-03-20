@@ -98,6 +98,11 @@ class AppState:
         self.printer_type = printer_type
         self.notify_update()
 
+    def set_printer_connected(self, connected: bool) -> None:
+        """Update printer connectivity state."""
+        self.printer_connected = connected
+        self.notify_update()
+
     def start_session(self, session_id: int) -> None:
         """Start a new tracking session."""
         self.session_active = True
